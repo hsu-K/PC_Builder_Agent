@@ -1,6 +1,5 @@
-def main():
-    print("Hello from pc-builder-agent!")
+from pc_builder_agent.cli import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
