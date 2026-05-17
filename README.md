@@ -71,8 +71,11 @@ uv run python main.py --chat --session-id my-project
 ## 目前的架構
 
 - `planner` 會先讀取偏好記憶，並視需要儲存新的偏好
-- `cpu_specialist` 與 `gpu_specialist` 會平行給出建議，必要時也能呼叫瓦數估算工具
-- `integrator` 會把三個 agent 的結果合成最後摘要
+- `router` 會根據需求判斷要啟動哪些 subAgent，避免每次都固定跑全部節點
+- `cpu_specialist` 與 `gpu_specialist` 會依路由結果被啟動，必要時也能呼叫瓦數估算工具
+- `integrator` 會把實際執行到的 agent 結果合成最後摘要
+
+如果之後要擴充新的 subAgent，只要新增對應節點，並在 `graph.py` 裡的路由關鍵字與註冊表補上即可。
 
 ## 記憶體
 

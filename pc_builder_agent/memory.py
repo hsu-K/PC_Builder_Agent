@@ -35,14 +35,12 @@ def format_profile_summary(profile_id: str) -> str:
 @tool
 def recall_user_preferences(profile_id: str) -> str:
     """Read the saved build preferences for this profile."""
-
     return format_profile_summary(profile_id)
 
 
 @tool
 def save_user_preference(profile_id: str, key: str, value: str) -> str:
     """Save a single preference for later conversations."""
-
     profile = load_profile(profile_id)
     preferences = dict(profile.get("preferences", {}))
     preferences[key] = value
@@ -54,20 +52,11 @@ def save_user_preference(profile_id: str, key: str, value: str) -> str:
     return f"已儲存偏好：{key} = {value}"
 
 
-@tool
-def estimate_psu_wattage(
-    cpu_tdp_watts: int,
-    gpu_tdp_watts: int,
-    extra_headroom_watts: int = 150,
-) -> str:
-    """Estimate a safe power supply wattage for a build."""
+# ============================================================================
+# 工具集合和工具查詢表
+# ============================================================================
 
-    estimated = cpu_tdp_watts + gpu_tdp_watts + extra_headroom_watts
-    recommended = ((estimated + 49) // 50) * 50
-    return (
-        f"估算總瓦數約 {estimated}W，建議電源至少 {recommended}W，"
-        f"並保留 {extra_headroom_watts}W 以上餘裕。"
-    )
+MEMORY_TOOLS = [recall_user_preferences, save_user_preference]
 
-
-MEMORY_TOOLS = [recall_user_preferences, save_user_preference, estimate_psu_wattage]
+# Profile 相關的工具集 - 用於查詢和保存使用者偏好，會自動添加 profile_id 參數
+PROFILE_TOOLS = {"recall_user_preferences", "save_user_preference"}
