@@ -35,4 +35,8 @@ def planner_node(state: dict, *, model_name: str | None = None) -> dict[str, Any
         model_name=model_name,
     )
     
+    print("Planner Node AI Message:", ai_message)
+    print("Planner Node Text Output:", text)
+    print("===============================================================")
+
     return {"messages": [ai_message], "plan": text}

@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 pc-builder-agent = "pc_builder_agent.cli:main"
+node-tester = "pc_builder_agent.tools.node_tester:main"
 
 [tool.uv]
 package = true

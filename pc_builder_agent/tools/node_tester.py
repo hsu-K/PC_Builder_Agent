@@ -5,7 +5,10 @@
 - 讓不同專案成員可獨立執行與測試 `pc_builder_agent.nodes` 下的 node 函式。
 - 預設使用內建的 mock model，避免呼叫外部 LLM API。
 
-使用範例：
+使用範例（使用 uv）：
+uv run node-tester --node cpu_specialist_node --state-json '{"request":"我要一台遊戲用電腦"}'
+
+或使用 Python 模組方式：
 python -m pc_builder_agent.tools.node_tester --node cpu_specialist_node --state-json '{"request":"我要一台遊戲用電腦"}'
 
 """
@@ -17,6 +20,15 @@ import json
 import pkgutil
 import sys
 from types import SimpleNamespace
+
+
+class SimpleNamespaceEncoder(json.JSONEncoder):
+    """自定義 JSON 編碼器，可以序列化 SimpleNamespace 物件。"""
+
+    def default(self, obj):
+        if isinstance(obj, SimpleNamespace):
+            return vars(obj)
+        return super().default(obj)
 
 
 def find_node(node_name: str):
@@ -100,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         print("執行 node 時發生錯誤：", e, file=sys.stderr)
         return 6
 
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(result, ensure_ascii=False, indent=2, cls=SimpleNamespaceEncoder))
     return 0
 
 

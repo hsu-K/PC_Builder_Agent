@@ -131,6 +131,10 @@ def router_node(state: dict, *, model_name: str | None = None) -> dict[str, Any]
     
     route_targets, route_reason = _route_targets_for_request(state, model_name=model_name)
     
+    print("Router Node Route Targets:", route_targets)
+    print("Router Node Route Reason:", route_reason)
+    print("===============================================================")
+
     return {
         "route_targets": route_targets,
         "route_reason": route_reason,
