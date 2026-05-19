@@ -24,11 +24,12 @@ def planner_node(state: dict, *, model_name: str | None = None) -> dict[str, Any
         state=state,
         role_name="planner agent",
         system_prompt=(
-            "先理解使用者需求並整理成可執行的組裝方向。\n"
-            "一定要先調用 recall_user_preferences 來讀取既有偏好。\n"
-            "如果使用者明確提到預算、用途、噪音、尺寸等限制，請用 save_user_preference 儲存。\n"
-            "若需要估算電源瓦數，可調用 estimate_psu_wattage。\n"
-            "輸出請簡潔，重點放在需求分類、優先順序與風險。"
+            "First understand the user's needs and turn them into an actionable PC build direction.\n"
+            "You must call recall_user_preferences first to load known preferences.\n"
+            "If the user explicitly mentions budget, use case, noise, size, or other constraints, save them with save_user_preference.\n"
+            "If power estimation is needed, call estimate_psu_wattage.\n"
+            "Keep the output concise and focus on requirement categories, priorities, and risks.\n"
+            "The final answer must be in Traditional Chinese (zh-TW)."
         ),
         tools=[recall_user_preferences, save_user_preference, estimate_psu_wattage],
         model_name=model_name,

@@ -60,9 +60,10 @@ def run_agent_turn(
     conversation = [
         SystemMessage(
             content=(
-                f"你是 {role_name}。\n"
-                f"session id: {state.get('profile_id', 'default')}\n"
-                f"已知記憶摘要:\n{format_profile_summary(state.get('profile_id', 'default'))}\n\n"
+                f"You are {role_name}.\n"
+                f"Session ID: {state.get('profile_id', 'default')}\n"
+                f"Known memory summary:\n{format_profile_summary(state.get('profile_id', 'default'))}\n\n"
+                "Always reply in Traditional Chinese (zh-TW).\n\n"
                 f"{system_prompt}"
             )
         ),

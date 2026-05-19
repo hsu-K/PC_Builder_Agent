@@ -66,15 +66,16 @@ def _route_targets_for_request(
     plan = state.get("plan", "")
 
     system_prompt = (
-        "你是 PC Builder Router。"
-        "請根據使用者需求語意決定要啟動哪些專家節點。"
-        "可用節點只有: cpu_specialist, gpu_specialist。"
-        "回覆只能是 JSON，格式為: "
-        '{"targets": ["cpu_specialist"], "reason": "..."}。'
-        "targets 必須是可用節點子集合，至少一個。"
+        "You are the PC Builder Router. "
+        "Decide which specialist nodes to activate based on the user's intent. "
+        "Available nodes are only: cpu_specialist, gpu_specialist. "
+        "Return JSON only, in this format: "
+        '{"targets": ["cpu_specialist"], "reason": "..."}. '
+        "The targets field must be a non-empty subset of available nodes. "
+        "Write the reason value in Traditional Chinese (zh-TW)."
     )
     user_prompt = (
-        "請判斷下列內容需要哪些節點。\n\n"
+        "Decide which nodes are needed for the following context.\n\n"
         f"request:\n{request}\n\n"
         f"planner summary:\n{plan}\n"
     )
