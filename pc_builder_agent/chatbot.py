@@ -1,45 +1,131 @@
 """
 聊天機器人模組：實現與 PC Builder Agent 的持續互動
 
-這個模組提供聊天介面，讓使用者可以：
-1. 提出 PC 組裝需求
-2. 持續與 agent 對話，提出追加問題或修改需求
-3. 保持記憶與偏好設定跨越多輪對話
+完整執行流程：
+1. 讀取 preference.json 資料存入 State
+2. 執行 PC_Board Scraper Node 根據偏好爬取文章
+3. 進入聊天模式，用戶可詢問爬取的文章內容
+4. 每輪對話時傳入完整 State，包含偏好和文章資訊
 """
 
-from langchain_core.messages import HumanMessage
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from langchain_core.messages import HumanMessage, AIMessage
 from pc_builder_agent.graph import build_graph
+from pc_builder_agent.nodes import pc_board_scraper_node
+from pc_builder_agent.memory import PROFILE_STORE, _profile_namespace, PROFILE_KEY
+
+
+def load_preferences() -> dict[str, str]:
+    """
+    讀取 preference.json 檔案
+    
+    Returns:
+        dict: 包含預設偏好設定的字典，若檔案不存在則返回空字典
+    """
+    preferences_path = Path(__file__).parent / "preference.json"
+    
+    if preferences_path.exists():
+        try:
+            with open(preferences_path, "r", encoding="utf-8") as f:
+                preferences = json.load(f)
+                print("\n【已載入預設偏好設定】")
+                print(json.dumps(preferences, ensure_ascii=False, indent=2))
+                return preferences
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"\n警告：無法讀取 preference.json - {e}")
+            return {}
+    else:
+        print("\n提示：尚未找到 preference.json，將使用空白偏好設定")
+        return {}
+
+
+def prepare_session_state(session_id: str, model_name: str | None = None) -> dict:
+    """讀取偏好並完成 PC_Board Scraper 前置初始化。"""
+
+    preferences = load_preferences()
+
+    if preferences:
+        PROFILE_STORE.put(
+            _profile_namespace(session_id),
+            PROFILE_KEY,
+            {"profile_id": session_id, "preferences": preferences},
+        )
+        print("✓ 已將偏好設定存入記憶系統")
+
+    print("\n【執行 PC_Board Scraper Node】")
+    state = {
+        "profile_id": session_id,
+        "preferences": preferences,
+        "request": "",
+        "messages": [],
+        "pc_board_results": [],
+    }
+
+    scraper_result = pc_board_scraper_node(state, model_name=model_name)
+    state.update(scraper_result)
+
+    PROFILE_STORE.put(
+        _profile_namespace(session_id),
+        PROFILE_KEY,
+        {
+            "profile_id": session_id,
+            "preferences": state.get("preferences", {}),
+            "pc_board_results": state.get("pc_board_results", []),
+        },
+    )
+    if preferences:
+        print("✓ 已將偏好與 PC_Board 文章存入記憶系統")
+
+    if state.get("pc_board_results"):
+        print("\n【PC_Board 文章已載入到 State】")
+        print(f"✓ 成功載入 {len(state['pc_board_results'])} 篇文章，供後續對話查詢")
+        for idx, article in enumerate(state["pc_board_results"], 1):
+            print(f"  {idx}. {article.get('title', 'N/A')}")
+
+    return state
 
 
 def run_chat(session_id: str = "default", model_name: str | None = None) -> None:
     """
     執行聊天機器人主迴圈
     
+    完整執行流程：
+    1. 讀取 preference.json 資料
+    2. 將偏好存入 State 和 PROFILE_STORE
+    3. 呼叫 pc_board_scraper_node 爬取相關文章，結果也存入 State
+    4. 進入聊天迴圈，用戶可詢問相關信息
+    5. 每輪對話時都傳入完整的 State（包含偏好和文章資訊）給 Agent
+    
     Args:
         session_id: 用於保持同一個對話會話的 ID，相同 ID 會共享記憶和偏好
         model_name: 使用的 OpenAI 模型名稱
-    
-    流程說明：
-    1. 建構 LangGraph agent，包含 planner、cpu_specialist、gpu_specialist 和 integrator
-    2. 進入持續對話迴圈，直到使用者輸入 'exit' 或 'quit'
-    3. 每輪對話會執行完整的 agent 分析流程，並保留之前的訊息歷史
-    4. Agent 會根據記憶自動調整建議
     """
     
-    # 建構 LangGraph 應用，包含所有 agent 節點和執行流程
+    print("=" * 60)
+    print("PC Builder Agent - 初始化中...")
+    print("=" * 60)
+    
+    state = prepare_session_state(session_id=session_id, model_name=model_name)
+    
+    # ===== 步驟 4：建構 LangGraph 應用 =====
     app = build_graph(model_name=model_name)
     
-    # 初始化訊息歷史 - 用於追蹤整個對話的訊息序列
-    # 這樣 agent 可以看到完整的對話上下文
+    # 初始化訊息歷史
     messages_history = []
     
-    print("=" * 60)
+    # ===== 步驟 5：進入聊天迴圈 =====
+    print("\n" + "=" * 60)
     print("PC Builder Agent - 聊天模式")
     print("=" * 60)
     print(f"Session ID: {session_id}")
+    print(f"已載入 {len(state.get('pc_board_results', []))} 篇 PC_Board 文章供參考")
     print("\n說明:")
     print("  • 輸入你的 PC 組裝需求")
-    print("  • 根據需要進行後續對話和修改")
+    print("  • 可詢問關於已載入文章的內容")
     print("  • 輸入 'exit' 或 'quit' 結束")
     print("=" * 60)
     print()
@@ -65,35 +151,36 @@ def run_chat(session_id: str = "default", model_name: str | None = None) -> None
         
         try:
             # 呼叫 LangGraph 應用執行完整的 agent 分析流程
-            # 
-            # 輸入狀態說明：
-            #   - profile_id: 用於查詢和保存使用者偏好 (跨越多輪對話)
-            #   - request: 最新的使用者需求 (用於 agent 分析)
-            #   - messages: 完整的對話歷史 (讓 agent 了解上下文)
+            # 傳入完整的 State，包含：
+            #   - profile_id: 使用者 ID
+            #   - preferences: 從 preference.json 讀取的偏好
+            #   - pc_board_results: 已爬取的 PC_Board 文章列表
+            #   - request: 目前輪次的使用者需求
+            #   - messages: 完整對話歷史
             #
-            # 執行流程：
-            #   1. planner agent: 理解需求，查詢/保存偏好
-            #   2. cpu_specialist & gpu_specialist: 並行分析 CPU/GPU 建議
-            #   3. integrator: 整合所有建議成最終回應
+            # Agent 可調用這些資訊來：
+            # 1. 查詢使用者偏好（preferences）
+            # 2. 參考已爬取的文章內容（pc_board_results）
+            # 3. 理解對話上下文（messages）
             result = app.invoke(
                 {
-                    "profile_id": session_id,  # 維持同一個使用者會話的記憶
-                    "request": user_input,      # 目前輪次的使用者需求
-                    "messages": messages_history,  # 完整對話歷史供 agent 參考
+                    "profile_id": session_id,  # 使用者會話 ID
+                    "preferences": state["preferences"],  # 偏好設定
+                    "pc_board_results": state["pc_board_results"],  # 已爬取的文章
+                    "request": user_input,  # 目前輪次的使用者需求
+                    "messages": messages_history,  # 完整對話歷史
                 },
-                config={"configurable": {"thread_id": session_id}},  # 線程 ID 用於檢查點管理
+                config={"configurable": {"thread_id": session_id}},
             )
             
-            # 從結果中取出最終的整合答案
+            # 從結果中取出最終的回應
             final_answer = result.get("final_answer", "")
             
             # 顯示 agent 的回應
             print(f"\nAgent: {final_answer}")
             print()
             
-            # 將 agent 的回應也加入訊息歷史，讓下一輪對話能參考
-            # 這樣可以保持完整的對話上下文
-            from langchain_core.messages import AIMessage
+            # 將 agent 的回應也加入訊息歷史
             messages_history.append(AIMessage(content=final_answer))
             
         except KeyboardInterrupt:

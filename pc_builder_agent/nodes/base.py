@@ -35,6 +35,32 @@ def conversation_messages(state: dict) -> list[BaseMessage]:
     return messages
 
 
+def _state_summary(state: dict) -> str:
+    """將 state 中的重要資料整理成可讀摘要，注入給 agent 參考。"""
+    preferences = state.get("preferences") or {}
+    pc_board_results = state.get("pc_board_results") or []
+
+    preference_lines = [f"- {key}: {value}" for key, value in preferences.items()]
+    if not preference_lines:
+        preference_lines = ["- 無偏好資料"]
+
+    board_lines = []
+    for article in pc_board_results[:5]:
+        title = article.get("title", "N/A")
+        content = article.get("content", "")
+        excerpt = content[:120].replace("\n", " ")
+        board_lines.append(f"- {title}: {excerpt}")
+
+    if not board_lines:
+        board_lines = ["- 尚未載入 PC_Board 文章"]
+
+    return (
+        "Current state snapshot:\n"
+        f"Preferences:\n{chr(10).join(preference_lines)}\n\n"
+        f"PC_Board articles:\n{chr(10).join(board_lines)}"
+    )
+
+
 def run_agent_turn(
     *,
     state: dict,
@@ -63,6 +89,7 @@ def run_agent_turn(
                 f"You are {role_name}.\n"
                 f"Session ID: {state.get('profile_id', 'default')}\n"
                 f"Known memory summary:\n{format_profile_summary(state.get('profile_id', 'default'))}\n\n"
+                f"{_state_summary(state)}\n\n"
                 "Always reply in Traditional Chinese (zh-TW).\n\n"
                 f"{system_prompt}"
             )

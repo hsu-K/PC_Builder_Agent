@@ -39,6 +39,8 @@ class BuildState(TypedDict, total=False):
     
     Attributes:
         profile_id (str): 使用者 ID，用於查詢和保存偏好設定
+        preferences (dict): 從 preference.json 讀取的使用者偏好
+        pc_board_results (list): 從 PC_Board Scraper 爬取的文章列表
         request (str): 使用者最新的 PC 組裝需求
         messages (Annotated[list[BaseMessage]]): 完整的對話歷史
         plan (str): planner agent 的分析結果
@@ -49,6 +51,8 @@ class BuildState(TypedDict, total=False):
         final_answer (str): integrator 整合後的最終建議
     """
     profile_id: str
+    preferences: dict
+    pc_board_results: list
     request: str
     messages: Annotated[list[BaseMessage], add_messages]
     plan: str

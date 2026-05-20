@@ -12,6 +12,7 @@ from pc_builder_agent.memory import MEMORY_TOOLS, PROFILE_TOOLS
 from pc_builder_agent.memory import (
     recall_user_preferences,
     save_user_preference,
+    recall_pc_board_articles,
 )
 from pc_builder_agent.tools.hardware import estimate_psu_wattage
 from pc_builder_agent.tools.scraper import web_scrape
@@ -26,6 +27,7 @@ __all__ = [
     "PROFILE_TOOLS",
     "recall_user_preferences",
     "save_user_preference",
+    "recall_pc_board_articles",
     "estimate_psu_wattage",
     "web_scrape",
 ]

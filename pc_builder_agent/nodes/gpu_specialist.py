@@ -12,6 +12,7 @@ from typing import Any
 from pc_builder_agent.nodes.base import run_agent_turn
 from pc_builder_agent.tools import (
     recall_user_preferences,
+    recall_pc_board_articles,
     estimate_psu_wattage,
 )
 
@@ -25,11 +26,12 @@ def gpu_specialist_node(state: dict, *, model_name: str | None = None) -> dict[s
         system_prompt=(
             "Focus on GPU selection, display resolution, thermal behavior, and power requirements.\n"
             "If the request mentions gaming, AI, video editing, or creative workloads, prioritize GPU-driven decisions.\n"
+            "If previously scraped article details are relevant, call recall_pc_board_articles.\n"
             "Call estimate_psu_wattage when needed.\n"
             "Explain the GPU selection direction clearly and concretely.\n"
             "The final answer must be in Traditional Chinese (zh-TW)."
         ),
-        tools=[recall_user_preferences, estimate_psu_wattage],
+        tools=[recall_user_preferences, recall_pc_board_articles, estimate_psu_wattage],
         model_name=model_name,
     )
     

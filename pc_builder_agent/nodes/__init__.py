@@ -11,6 +11,7 @@ from pc_builder_agent.nodes.cpu_specialist import cpu_specialist_node
 from pc_builder_agent.nodes.gpu_specialist import gpu_specialist_node
 from pc_builder_agent.nodes.integrator import integrator_node
 from pc_builder_agent.nodes.base import run_agent_turn
+from pc_builder_agent.nodes.pc_board_scraper import pc_board_scraper_node
 
 __all__ = [
     "planner_node",
@@ -19,4 +20,5 @@ __all__ = [
     "gpu_specialist_node",
     "integrator_node",
     "run_agent_turn",
+    "pc_board_scraper_node",
 ]

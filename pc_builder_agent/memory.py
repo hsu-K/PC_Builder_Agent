@@ -18,7 +18,7 @@ def _profile_namespace(profile_id: str) -> tuple[str, ...]:
 def load_profile(profile_id: str) -> dict[str, Any]:
     item = PROFILE_STORE.get(_profile_namespace(profile_id), PROFILE_KEY)
     if item is None:
-        return {"profile_id": profile_id, "preferences": {}}
+        return {"profile_id": profile_id, "preferences": {}, "pc_board_results": []}
     return item.value
 
 
@@ -32,6 +32,23 @@ def format_profile_summary(profile_id: str) -> str:
     return json.dumps(preferences, ensure_ascii=False, indent=2)
 
 
+def format_pc_board_summary(profile_id: str) -> str:
+    profile = load_profile(profile_id)
+    pc_board_results = profile.get("pc_board_results", [])
+
+    if not pc_board_results:
+        return "目前沒有已儲存的 PC_Board 文章。"
+
+    summary_lines = []
+    for index, article in enumerate(pc_board_results, 1):
+        title = article.get("title", "N/A")
+        content = article.get("content", "")
+        excerpt = content[:160].replace("\n", " ")
+        summary_lines.append(f"{index}. {title}\n   {excerpt}")
+
+    return "\n".join(summary_lines)
+
+
 @tool
 def recall_user_preferences(profile_id: str) -> str:
     """Read the saved build preferences for this profile."""
@@ -43,20 +60,32 @@ def save_user_preference(profile_id: str, key: str, value: str) -> str:
     """Save a single preference for later conversations."""
     profile = load_profile(profile_id)
     preferences = dict(profile.get("preferences", {}))
+    pc_board_results = list(profile.get("pc_board_results", []))
     preferences[key] = value
     PROFILE_STORE.put(
         _profile_namespace(profile_id),
         PROFILE_KEY,
-        {"profile_id": profile_id, "preferences": preferences},
+        {
+            "profile_id": profile_id,
+            "preferences": preferences,
+            "pc_board_results": pc_board_results,
+        },
     )
+    print(f"已儲存偏好： {key} = {value}")
     return f"已儲存偏好：{key} = {value}"
+
+
+@tool
+def recall_pc_board_articles(profile_id: str) -> str:
+    """Read the saved PC_Board article results for this profile."""
+    return format_pc_board_summary(profile_id)
 
 
 # ============================================================================
 # 工具集合和工具查詢表
 # ============================================================================
 
-MEMORY_TOOLS = [recall_user_preferences, save_user_preference]
+MEMORY_TOOLS = [recall_user_preferences, save_user_preference, recall_pc_board_articles]
 
 # Profile 相關的工具集 - 用於查詢和保存使用者偏好，會自動添加 profile_id 參數
-PROFILE_TOOLS = {"recall_user_preferences", "save_user_preference"}
+PROFILE_TOOLS = {"recall_user_preferences", "save_user_preference", "recall_pc_board_articles"}

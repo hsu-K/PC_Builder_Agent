@@ -13,6 +13,7 @@ from pc_builder_agent.nodes.base import run_agent_turn
 from pc_builder_agent.tools import (
     recall_user_preferences,
     save_user_preference,
+    recall_pc_board_articles,
     estimate_psu_wattage,
 )
 
@@ -26,12 +27,13 @@ def planner_node(state: dict, *, model_name: str | None = None) -> dict[str, Any
         system_prompt=(
             "First understand the user's needs and turn them into an actionable PC build direction.\n"
             "You must call recall_user_preferences first to load known preferences.\n"
-            "If the user explicitly mentions budget, use case, noise, size, or other constraints, save them with save_user_preference.\n"
+            "If the user asks about previously scraped articles or menus, call recall_pc_board_articles.\n"
+            "If the user explicitly mentions budget, use case, size, or other constraints, save them with save_user_preference.\n"
             "If power estimation is needed, call estimate_psu_wattage.\n"
             "Keep the output concise and focus on requirement categories, priorities, and risks.\n"
             "The final answer must be in Traditional Chinese (zh-TW)."
         ),
-        tools=[recall_user_preferences, save_user_preference, estimate_psu_wattage],
+        tools=[recall_user_preferences, save_user_preference, recall_pc_board_articles, estimate_psu_wattage],
         model_name=model_name,
     )
     
