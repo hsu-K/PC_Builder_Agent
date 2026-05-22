@@ -18,7 +18,12 @@ from pc_builder_agent.tools import (
 )
 
 
-def planner_node(state: dict, *, model_name: str | None = None) -> dict[str, Any]:
+def planner_node(
+    state: dict,
+    *,
+    model_name: str | None = None,
+    debug: bool = False,
+) -> dict[str, Any]:
     """Planner Node 的執行函數"""
     
     ai_message, text = run_agent_turn(
@@ -35,10 +40,12 @@ def planner_node(state: dict, *, model_name: str | None = None) -> dict[str, Any
         ),
         tools=[recall_user_preferences, save_user_preference, recall_pc_board_articles, estimate_psu_wattage],
         model_name=model_name,
+        debug=debug,
     )
     
-    print("Planner Node AI Message:", ai_message)
-    print("Planner Node Text Output:", text)
-    print("===============================================================")
+    if debug:
+        print("Planner Node AI Message:", ai_message)
+        print("Planner Node Text Output:", text)
+        print("===============================================================")
 
     return {"messages": [ai_message], "plan": text}

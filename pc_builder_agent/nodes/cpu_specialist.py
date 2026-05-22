@@ -17,7 +17,12 @@ from pc_builder_agent.tools import (
 )
 
 
-def cpu_specialist_node(state: dict, *, model_name: str | None = None) -> dict[str, Any]:
+def cpu_specialist_node(
+    state: dict,
+    *,
+    model_name: str | None = None,
+    debug: bool = False,
+) -> dict[str, Any]:
     """CPU Specialist Node 的執行函數"""
     
     ai_message, text = run_agent_turn(
@@ -33,6 +38,7 @@ def cpu_specialist_node(state: dict, *, model_name: str | None = None) -> dict[s
         ),
         tools=[recall_user_preferences, recall_pc_board_articles, estimate_psu_wattage],
         model_name=model_name,
+        debug=debug,
     )
     
     return {"messages": [ai_message], "cpu_advice": text}

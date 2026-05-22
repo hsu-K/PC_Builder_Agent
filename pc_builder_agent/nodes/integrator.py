@@ -14,7 +14,12 @@ from pc_builder_agent.nodes.base import build_model, message_text
 from pc_builder_agent.memory import format_profile_summary
 
 
-def integrator_node(state: dict, *, model_name: str | None = None) -> dict[str, Any]:
+def integrator_node(
+    state: dict,
+    *,
+    model_name: str | None = None,
+    debug: bool = False,
+) -> dict[str, Any]:
     """Integrator Node 的執行函數"""
     
     model = build_model(model_name)

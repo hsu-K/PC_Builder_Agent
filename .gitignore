@@ -9,3 +9,5 @@ wheels/
 # Virtual environments
 .venv
 .env
+.github
+pc_builder_agent/data/

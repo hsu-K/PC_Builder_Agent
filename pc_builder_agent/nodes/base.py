@@ -68,6 +68,7 @@ def run_agent_turn(
     system_prompt: str,
     tools: list[Any],
     model_name: str | None = None,
+    debug: bool = False,
 ) -> tuple[AIMessage, str]:
     """
     執行一個 Agent 的對話輪次
@@ -100,6 +101,11 @@ def run_agent_turn(
     # 工具呼叫迴圈
     while True:
         ai_message = model.invoke(conversation)
+
+        if debug:
+            print(f"\n【{role_name} 回應】")
+            print(f"✓ AIMessage 內容:\n{ai_message}")
+        
         conversation.append(ai_message)
 
         if not ai_message.tool_calls:

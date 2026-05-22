@@ -1,102 +1,182 @@
 """
-PC_Board Scraper Node（測試版）
+PC_Board Scraper Node
 
 功能：
-- 根據 state 中的 preferences，爬取相關 PC_Board 文章
-- 將爬取的文章列表存到 state['pc_board_results']，供其他 Agent 參考
+- 爬取模式：根據 state 中的 preferences，爬取 PC_Board 文章並存本地
+- 查詢模式：讀取本地文章，根據用戶問題進行解讀和回答
 
-注意：此版本並不執行真實爬蟲，僅回傳模擬資料供測試。
+由 router 判斷是否進入查詢模式。
 """
 
+import json
 from typing import Any
 
+from pc_builder_agent.nodes.base import run_agent_turn, message_text
+from pc_builder_agent.tools import pc_board_scraper
+from pc_builder_agent.tools.scraper import (
+    normalize_articles_payload,
+    save_articles_to_disk,
+    load_articles_from_disk,
+)
 
-def pc_board_scraper_node(state: dict, *, model_name: str | None = None) -> dict[str, Any]:
-    """根據偏好爬取 PC_Board 文章的 Node
+
+def pc_board_scraper_node(
+    state: dict,
+    *,
+    model_name: str | None = None,
+    mode: str = "fetch",
+    debug: bool = False,
+) -> dict[str, Any]:
+    """PC_Board Scraper Node - 支持爬取和查詢兩種模式
 
     Args:
         state: 包含 preferences 的作業狀態
-        model_name: 使用的 LLM 模組（此例未使用）
-    
+        model_name: 使用的 LLM 模組
+        mode: 執行模式
+            - "fetch": 爬取新文章並存本地（初始化時）
+            - "query": 查詢本地文章並根據用戶問題進行解讀
+
     Returns:
-        dict: 包含 pc_board_results 的字典，供完整 Agent 流程使用
+        dict: 包含 pc_board_results 或回應文本的字典
     """
     
-    preferences = state.get("preferences", {})
-    budget = preferences.get("budget", "未指定")
-    use_case = preferences.get("use_case", "未指定")
+    profile_id = state.get("profile_id", "default")
     
-    # 根據偏好產生模擬的 PC_Board 文章
-    pc_board_articles = []
+    if mode == "fetch":
+        return _fetch_and_save_articles(state, profile_id, model_name, debug=debug)
+    elif mode == "query":
+        return _query_local_articles(state, profile_id, model_name, debug=debug)
+    else:
+        return {"pc_board_results": []}
+
+
+def _fetch_and_save_articles(
+    state: dict,
+    profile_id: str,
+    model_name: str | None,
+    *,
+    debug: bool = False,
+) -> dict[str, Any]:
+    """爬取模式：根據偏好爬取文章並存本地"""
     
-    # 模擬文章 1: 預算分析文章
-    if budget and use_case:
-        pc_board_articles.append({
-            "id": "pcb_001",
-            "title": f"[菜單] 50k遊戲機",
-            "url": "https://www.ptt.cc/bbs/PC_Shopping/M.1779164308.A.DD1.html",
-            "author": "LiuJY0327 (Hansel)",
-            "date": "2026-05-19",
-            "content": (
-                f"預算/用途：50k\n"
-                f"每次大概1-2個遊戲在跑而已，SSD抓1T應該夠，也比較符合自己預算\n"
-                f"\n"
-                f"CPU (中央處理器)：AMD Ryzen7 7800X3D Tray\n"
-                f"MB      (主機板)：【任搭CPU】華碩 TUF GAMING B650-E WIFI\n"
-                f"RAM     (記憶體)：【X3D專案】V-COLOR MANTA XSKY RGB DDR5-6000 32GB(16G*2)黑\n"
-                f"VGA     (顯示卡)：【救贖】華碩 PRIME-RX9060XT-O16G\n"
-                f"Cooler  (散熱器)： ID-COOLING FROZN A620 PRO SE ARGB 黑\n"
-                f"SSD   (固態硬碟)：鎧俠 KIOXIA Exceria G2 1TB\n"
-                f"HDD       (硬碟)：\n"
-                f"PSU (電源供應器)：【救贖】MONTECH Century II 850W 金牌電源\n"
-                f"CHASSIS   (機殼)：聯力 V100R 黑 全景玻璃機殼\n"
-                f"MONITOR   (螢幕)：1080p自備\n"
-                f"Mouse/KB  (鼠鍵)：\n"
-                f"OS    (作業系統)：\n"
-                f"\n"
-                f"其它      (自填)：\n"
-                f"總價 (未稅/含稅)：50,499"
-            ),
-            "comments": (
-                "→ marsqq: 如果是跑3a不是競技類的話可考慮降成7700   114.33.93.15 05/19 12:57\n"
-                "→ marsqq: 價差看省起來或補顯卡或其它地方   114.33.93.15 05/19 12:58\n"
-                "→ Zenryaku: 顯卡拿Nitro+ +電源送G2 2T ，比你這樣 27.242.132.214 05/19 13:10\n"
-                "→ Zenryaku: 買1T還便宜 27.242.132.214 05/19 13:10\n"
-                "→ Zenryaku: 再不然也拿技嘉gaming+電源+ssd送主機板 27.242.132.214 05/19 13:11\n"
-                "→ Zenryaku: 主板不要買這張，比差不多的em force貴 27.242.132.214 05/19 13:12\n"
-                "→ Zenryaku: 五百，比更高級的b650a只便宜五百 27.242.132.214 05/19 13:12\n"
-                "→ Zenryaku: xsky比較高，你要雙塔的話要拿高度160以 27.242.132.214 05/19 13:13\n"
-                "→ Zenryaku: 上或是有偏移的 27.242.132.214 05/19 13:13\n"
-                "→ Zenryaku: 一樓 降7700要拿同性能的記憶體不會比 27.242.132.214 05/19 13:17\n"
-                "→ Zenryaku: 較省 27.242.132.214 05/19 13:17\n"
-                "推 aa0801aa: idcooling的a410不錯啊，熱管直觸對AMD    27.51.9.211 05/19 15:07\n"
-                "→ aa0801aa: 單CCD有奇效，單塔雙扇很夠了，78X3D連1    27.51.9.211 05/19 １5:07\n"
-                "→ aa0801aa: 00w都跑不到用什麼雙塔    27.5１.9.２１１ 05/１９ １５:０７\n"
-                "→ Zenryaku: xsky沒了 可以用黑王蛇代替 貴一點點 ２７.２４２.１３２.２１４ ０５/１９ １８:１６\n"
-                "→ cutejojocat: ７８X３D問題是積熱 預算夠在意溫度就上 ３６.２２９.２４８.１６５ ０５/２０ ０１:１１\n"
-                "→ cutejojocat: 雙塔 顯卡不在意非三大廠的話 藍寶 ３６.２２９.２４８.１６５ ０５/２０ ０１:１１\n"
-                "→ cutejojocat: 石也是五年保  "
-            ),
-        })
-    
-    # 模擬文章 2: 顯示卡比較文章
-    pc_board_articles.append({
-        "id": "pcb_002",
-        "title": "2026 年中端顯示卡推薦鑑賞",
-        "url": "https://www.pc-board.cc/bbs/PC_Shopping/M.1234567891.A.html",
-        "author": "GPU_Expert",
-        "date": "2026-05-19",
-        "content": (
-            "我整理了 2026 年中端 GPU 的一些撥特\n"
-            "RTX 4070: 優誼的 1440P 機能\n"
-            "RX 7800 XT: 地鱗章幀，效能相似"
+    ai_message, text = run_agent_turn(
+        state=state,
+        role_name="PC Board Scraper Agent",
+        system_prompt=(
+            "你是 PC_Board 爬蟲 Agent。\n"
+            "你的工作是根據使用者的預算和需求，判斷是否需要爬取 PTT PC_Shopping 版的相關文章。\n"
+            "如果判斷需要爬取，使用 pc_board_scraper 工具來獲取相關文章。\n"
+            "工具會返回模擬的 PC 組裝文章清單，包含各種配置方案和社群的討論。\n"
+            "最後回傳爬取到的文章資訊。\n"
+            "回應請保持此json格式回傳\n"
+            "\"Articles\": { \"article1\": the first article content, \"article2\": the second article content }"
         ),
-    })
+        tools=[pc_board_scraper],
+        model_name=model_name,
+        debug=debug,
+    )
+
+    raw_message_text = message_text(ai_message).strip()
+    if debug:
+        print("PC_Board Scraper Agent AI Message:", raw_message_text)
+
+    pc_board_articles: list[dict] = []
+
+    # 先嘗試直接解析模型回傳的 JSON，支援你貼的 Articles/article1/article2 格式
+    if raw_message_text:
+        try:
+            parsed_payload = json.loads(raw_message_text)
+            pc_board_articles = normalize_articles_payload(parsed_payload)
+        except json.JSONDecodeError:
+            pc_board_articles = []
+
+    # 如果模型回傳不是可解析 JSON，再回退到 tool 結果
+    preferences = state.get("preferences", {})
+    budget = preferences.get("budget")
+    use_case = preferences.get("use_case")
     
+    if not pc_board_articles and budget and use_case:
+        # 直接呼叫 tool 取得文章
+        result = pc_board_scraper.invoke({"budget": budget, "use_case": use_case})
+        pc_board_articles = normalize_articles_payload(result)
+
+    # 保存到本地
+    if pc_board_articles:
+        save_articles_to_disk(pc_board_articles, profile_id)
     
-    print(f"\n✓ PC_Board Scraper 成功爬取 {len(pc_board_articles)} 篇文章")
-    for idx, article in enumerate(pc_board_articles, 1):
-        print(f"   {idx}. [{article['id']}] {article['title']}")
+    if debug:
+        print(f"\n✓ PC_Board Scraper 成功爬取 {len(pc_board_articles)} 篇文章")
+        for idx, article in enumerate(pc_board_articles[:5], 1):
+            print(f"   {idx}. [{article.get('id', 'N/A')}] {article.get('title', 'N/A')}")
     
-    # 回傳整合的結果
     return {"pc_board_results": pc_board_articles}
+
+
+def _query_local_articles(
+    state: dict,
+    profile_id: str,
+    model_name: str | None,
+    *,
+    debug: bool = False,
+) -> dict[str, Any]:
+    """查詢模式：讀取本地文章並根據用戶問題進行解讀"""
+    
+    # 從本地讀取文章
+    local_articles = load_articles_from_disk(profile_id)
+    
+    if not local_articles:
+        return {
+            "messages": [],
+            "pc_board_response": "尚未爬取 PC_Board 文章。請先執行初始化爬取。",
+        }
+    
+    # 準備文章摘要供 agent 參考
+    articles_summary = _prepare_articles_summary(local_articles)
+    
+    # 創建增強的 state，包含本地文章信息
+    enhanced_state = dict(state)
+    enhanced_state["pc_board_results"] = local_articles
+    enhanced_state["pc_board_articles_summary"] = articles_summary
+    
+    # 使用 agent 根據本地文章回答用戶問題
+    ai_message, response_text = run_agent_turn(
+        state=enhanced_state,
+        role_name="PC Board Query Agent",
+        system_prompt=(
+            "你是 PC_Board 查詢 Agent。\n"
+            "你有權限存取本地已爬取的 PC_Shopping 版文章。\n"
+            "根據用戶的問題和文章內容，提供相關的建議或信息。\n"
+            "如果文章中有相關內容，請引用具體的配置方案或社群討論。\n"
+            "最後回傳清晰的回答。"
+        ),
+        tools=[],  # 查詢模式不需要工具
+        model_name=model_name,
+        debug=debug,
+    )
+    
+    if debug:
+        print(f"\n✓ 已從本地載入 {len(local_articles)} 篇文章進行查詢")
+    
+    return {
+        "messages": [ai_message],
+        "pc_board_response": response_text,
+    }
+
+
+def _prepare_articles_summary(articles: list[dict]) -> str:
+    """準備文章摘要供 agent 參考"""
+    summary_lines = []
+    
+    for idx, article in enumerate(articles, 1):
+        title = article.get("title", "N/A")
+        content = article.get("content", "")
+        excerpt = content[:150].replace("\n", " ") if content else ""
+        
+        summary_lines.append(
+            f"{idx}. 【{title}】\n"
+            f"   作者：{article.get('author', 'N/A')}\n"
+            f"   日期：{article.get('date', 'N/A')}\n"
+            f"   摘要：{excerpt}"
+        )
+    
+    return "\n\n".join(summary_lines)

@@ -4,6 +4,7 @@ Router Node - 根據需求決定啟動哪些 subAgent
 職責：
 - 使用 LLM 的語意理解決定要啟動哪些專家
 - 備援關鍵字匹配以防 LLM 失敗
+- 支持路由到 pc_board_scraper 進行文章查詢
 - 返回選中的 subAgent 名稱和路由原因
 """
 
@@ -14,7 +15,7 @@ from pc_builder_agent.nodes.base import build_model, message_text
 
 
 # 常數定義
-AVAILABLE_SPECIALISTS = ["cpu_specialist", "gpu_specialist"]
+AVAILABLE_SPECIALISTS = ["cpu_specialist", "gpu_specialist", "pc_board_scraper"]
 DEFAULT_ROUTE_TARGETS = ["cpu_specialist", "gpu_specialist"]
 
 CPU_KEYWORDS = (
@@ -25,6 +26,11 @@ CPU_KEYWORDS = (
 GPU_KEYWORDS = (
     "gpu", "顯卡", "顯示卡", "遊戲", "1440p", "4k",
     "光追", "fps", "ai", "剪輯", "繪圖", "渲染",
+)
+
+PC_BOARD_KEYWORDS = (
+    "文章", "菜單", "推薦", "ptt", "分享", "討論", "社群",
+    "之前", "爬取", "查看", "看看", "告訴我", "有什麼", "介紹",
 )
 
 
@@ -39,6 +45,11 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     combined_text = "\n".join(
         part for part in [state.get("request", ""), state.get("plan", "")] if part
     ).lower()
+
+    # 優先檢查是否在查詢文章
+    pc_board_match = _contains_keyword(combined_text, PC_BOARD_KEYWORDS)
+    if pc_board_match:
+        return ["pc_board_scraper"], "使用者想查看之前爬取的 PC_Board 文章"
 
     cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
     gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS)
@@ -68,7 +79,8 @@ def _route_targets_for_request(
     system_prompt = (
         "You are the PC Builder Router. "
         "Decide which specialist nodes to activate based on the user's intent. "
-        "Available nodes are only: cpu_specialist, gpu_specialist. "
+        "Available nodes are: cpu_specialist, gpu_specialist, pc_board_scraper. "
+        "Use pc_board_scraper when the user wants to query previously scraped articles. "
         "Return JSON only, in this format: "
         '{"targets": ["cpu_specialist"], "reason": "..."}. '
         "The targets field must be a non-empty subset of available nodes. "
@@ -126,14 +138,20 @@ def _route_targets_for_request(
         return _keyword_fallback_route_targets(state)
 
 
-def router_node(state: dict, *, model_name: str | None = None) -> dict[str, Any]:
+def router_node(
+    state: dict,
+    *,
+    model_name: str | None = None,
+    debug: bool = False,
+) -> dict[str, Any]:
     """Router Node 的執行函數"""
     
     route_targets, route_reason = _route_targets_for_request(state, model_name=model_name)
     
-    print("Router Node Route Targets:", route_targets)
-    print("Router Node Route Reason:", route_reason)
-    print("===============================================================")
+    if debug:
+        print("Router Node Route Targets:", route_targets)
+        print("Router Node Route Reason:", route_reason)
+        print("===============================================================")
 
     return {
         "route_targets": route_targets,

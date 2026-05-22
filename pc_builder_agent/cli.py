@@ -55,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
         help="使用的 OpenAI 模型名稱 (預設: gpt-4.1-mini)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="啟用除錯輸出",
+    )
     return parser.parse_args()
 
 
@@ -78,5 +83,5 @@ def main() -> int:
     # 1. 讀取 preference.json
     # 2. 呼叫 pc_board_scraper_node
     # 3. 進入聊天迴圈
-    run_chat(session_id=args.session_id, model_name=args.model)
+    run_chat(session_id=args.session_id, model_name=args.model, debug=args.debug)
     return 0

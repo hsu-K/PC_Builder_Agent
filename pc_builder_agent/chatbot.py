@@ -43,8 +43,12 @@ def load_preferences() -> dict[str, str]:
         return {}
 
 
-def prepare_session_state(session_id: str, model_name: str | None = None) -> dict:
-    """讀取偏好並完成 PC_Board Scraper 前置初始化。"""
+def prepare_session_state(
+    session_id: str,
+    model_name: str | None = None,
+    debug: bool = False,
+) -> dict:
+    """讀取偏好並完成 PC_Board Scraper 前置初始化（爬取模式）。"""
 
     preferences = load_preferences()
 
@@ -56,7 +60,7 @@ def prepare_session_state(session_id: str, model_name: str | None = None) -> dic
         )
         print("✓ 已將偏好設定存入記憶系統")
 
-    print("\n【執行 PC_Board Scraper Node】")
+    print("\n【執行 PC_Board Scraper Node - 爬取模式】")
     state = {
         "profile_id": session_id,
         "preferences": preferences,
@@ -65,31 +69,41 @@ def prepare_session_state(session_id: str, model_name: str | None = None) -> dic
         "pc_board_results": [],
     }
 
-    scraper_result = pc_board_scraper_node(state, model_name=model_name)
+    # 以爬取模式執行 pc_board_scraper_node，根據偏好爬取文章並存本地
+    scraper_result = pc_board_scraper_node(
+        state,
+        model_name=model_name,
+        mode="fetch",
+        debug=debug,
+    )
     state.update(scraper_result)
 
-    PROFILE_STORE.put(
-        _profile_namespace(session_id),
-        PROFILE_KEY,
-        {
-            "profile_id": session_id,
-            "preferences": state.get("preferences", {}),
-            "pc_board_results": state.get("pc_board_results", []),
-        },
-    )
+    # PROFILE_STORE.put(
+    #     _profile_namespace(session_id),
+    #     PROFILE_KEY,
+    #     {
+    #         "profile_id": session_id,
+    #         "preferences": state.get("preferences", {}),
+    #         "pc_board_results": state.get("pc_board_results", []),
+    #     },
+    # )
     if preferences:
         print("✓ 已將偏好與 PC_Board 文章存入記憶系統")
 
     if state.get("pc_board_results"):
         print("\n【PC_Board 文章已載入到 State】")
         print(f"✓ 成功載入 {len(state['pc_board_results'])} 篇文章，供後續對話查詢")
-        for idx, article in enumerate(state["pc_board_results"], 1):
+        for idx, article in enumerate(state["pc_board_results"][:5], 1):
             print(f"  {idx}. {article.get('title', 'N/A')}")
 
     return state
 
 
-def run_chat(session_id: str = "default", model_name: str | None = None) -> None:
+def run_chat(
+    session_id: str = "default",
+    model_name: str | None = None,
+    debug: bool = False,
+) -> None:
     """
     執行聊天機器人主迴圈
     
@@ -109,10 +123,10 @@ def run_chat(session_id: str = "default", model_name: str | None = None) -> None
     print("PC Builder Agent - 初始化中...")
     print("=" * 60)
     
-    state = prepare_session_state(session_id=session_id, model_name=model_name)
+    state = prepare_session_state(session_id=session_id, model_name=model_name, debug=debug)
     
     # ===== 步驟 4：建構 LangGraph 應用 =====
-    app = build_graph(model_name=model_name)
+    app = build_graph(model_name=model_name, debug=debug)
     
     # 初始化訊息歷史
     messages_history = []
@@ -122,10 +136,10 @@ def run_chat(session_id: str = "default", model_name: str | None = None) -> None
     print("PC Builder Agent - 聊天模式")
     print("=" * 60)
     print(f"Session ID: {session_id}")
-    print(f"已載入 {len(state.get('pc_board_results', []))} 篇 PC_Board 文章供參考")
+    # print(f"已載入 {len(state.get('pc_board_results', []))} 篇 PC_Board 文章供參考")
     print("\n說明:")
     print("  • 輸入你的 PC 組裝需求")
-    print("  • 可詢問關於已載入文章的內容")
+    print("  • 可詢問關於已載入文章的內容（如：'告訴我文章中有哪些配置'）")
     print("  • 輸入 'exit' 或 'quit' 結束")
     print("=" * 60)
     print()
@@ -158,30 +172,36 @@ def run_chat(session_id: str = "default", model_name: str | None = None) -> None
             #   - request: 目前輪次的使用者需求
             #   - messages: 完整對話歷史
             #
-            # Agent 可調用這些資訊來：
-            # 1. 查詢使用者偏好（preferences）
-            # 2. 參考已爬取的文章內容（pc_board_results）
-            # 3. 理解對話上下文（messages）
+            # 工作流程會自動根據使用者需求決定：
+            # 1. 呼叫 planner 理解需求
+            # 2. 呼叫 router 判斷是否查詢文章或建議配置
+            # 3. 若查詢文章：呼叫 pc_board_scraper（查詢模式）
+            #    若建議配置：並行呼叫 cpu_specialist 和 gpu_specialist，最後由 integrator 整合
             result = app.invoke(
                 {
                     "profile_id": session_id,  # 使用者會話 ID
                     "preferences": state["preferences"],  # 偏好設定
-                    "pc_board_results": state["pc_board_results"],  # 已爬取的文章
+                    # "pc_board_results": state["pc_board_results"],  # 已爬取的文章
                     "request": user_input,  # 目前輪次的使用者需求
                     "messages": messages_history,  # 完整對話歷史
                 },
                 config={"configurable": {"thread_id": session_id}},
             )
             
-            # 從結果中取出最終的回應
-            final_answer = result.get("final_answer", "")
+            # 從結果中取出回應
+            # 如果是查詢文章，優先使用 pc_board_response
+            # 否則使用 final_answer
+            response = result.get("pc_board_response") or result.get("final_answer", "")
+            
+            if not response:
+                response = "無法生成回應，請重新嘗試。"
             
             # 顯示 agent 的回應
-            print(f"\nAgent: {final_answer}")
+            print(f"\nAgent: {response}")
             print()
             
             # 將 agent 的回應也加入訊息歷史
-            messages_history.append(AIMessage(content=final_answer))
+            messages_history.append(AIMessage(content=response))
             
         except KeyboardInterrupt:
             # 允許使用者用 Ctrl+C 中斷
