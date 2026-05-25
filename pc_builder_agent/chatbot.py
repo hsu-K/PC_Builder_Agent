@@ -187,6 +187,7 @@ def run_chat(
                 },
                 config={"configurable": {"thread_id": session_id}},
             )
+
             
             # 從結果中取出回應
             # 如果是查詢文章，優先使用 pc_board_response

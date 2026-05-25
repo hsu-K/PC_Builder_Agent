@@ -72,6 +72,7 @@ class BuildState(TypedDict, total=False):
 
 def _dispatch_specialists(state: BuildState) -> list[Send]:
     """根據 router 結果，決定要並行執行哪些 subAgent"""
+    # print(state)
     targets = state.get("route_targets") or ["cpu_specialist", "gpu_specialist"]
     
     # 如果包含 pc_board_scraper，優先執行它
