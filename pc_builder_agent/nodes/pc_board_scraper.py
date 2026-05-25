@@ -63,13 +63,20 @@ def _fetch_and_save_articles(
         state=state,
         role_name="PC Board Scraper Agent",
         system_prompt=(
-            "你是 PC_Board 爬蟲 Agent。\n"
-            "你的工作是根據使用者的預算和需求，判斷是否需要爬取 PTT PC_Shopping 版的相關文章。\n"
-            "如果判斷需要爬取，使用 pc_board_scraper 工具來獲取相關文章。\n"
-            "工具會返回模擬的 PC 組裝文章清單，包含各種配置方案和社群的討論。\n"
-            "最後回傳爬取到的文章資訊。\n"
-            "回應請保持此json格式回傳\n"
-            "\"Articles\": { \"article1\": the first article content, \"article2\": the second article content }"
+            '''"
+            You are the PC_Board Scraper Agent.
+            Your task is to determine, based on the user's budget and requirements, whether it is necessary to scrape relevant posts from the PTT PC_Shopping board.
+            If you determine that scraping is needed, use the pc_board_scraper tool to retrieve the relevant articles.
+            The tool will return a simulated list of PC build articles, including various configuration proposals and community discussions.
+            Finally, return the retrieved article information.
+            Please respond using this JSON format:
+            {
+                \"Articles\": {
+                    \"article1\": \"the first article content\",
+                    \"article2\": \"the second article content\"
+                }
+            }
+            "'''
         ),
         tools=[pc_board_scraper],
         model_name=model_name,
@@ -143,11 +150,13 @@ def _query_local_articles(
         state=enhanced_state,
         role_name="PC Board Query Agent",
         system_prompt=(
-            "你是 PC_Board 查詢 Agent。\n"
-            "你有權限存取本地已爬取的 PC_Shopping 版文章。\n"
-            "根據用戶的問題和文章內容，提供相關的建議或信息。\n"
-            "如果文章中有相關內容，請引用具體的配置方案或社群討論。\n"
-            "最後回傳清晰的回答。"
+            '''"
+            You are the PC_Board Query Agent.
+            You have access to locally scraped posts from the PTT PC_Shopping board.
+            Based on the user's question and the article contents, provide relevant recommendations or information.
+            If the articles contain relevant content, cite specific configuration proposals or community discussions.
+            Finally, return a clear and concise answer(In Chinese zh-TW).
+            "'''
         ),
         tools=[],  # 查詢模式不需要工具
         model_name=model_name,
