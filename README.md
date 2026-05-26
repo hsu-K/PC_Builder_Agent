@@ -72,7 +72,7 @@ uv run main.py --debug
 
 ## 共同開發流程
 
-- Fork → 建 feature branch → 開發並加上測試 → 發 PR。
+- 加入Collaborators → 建 feature branch → 開發並加上測試 → 發 PR。
 - PR 記得描述：新增的 node/tool 目的、輸入輸出格式、必要的 state 欄位。
 
 ### 範例：測試 Node（router 範例）

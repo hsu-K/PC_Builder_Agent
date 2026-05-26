@@ -1,8 +1,8 @@
 # TODO
 
 ## pc_board_scraper Node
-1. 能夠根據需求去爬取所需的文章
-2. 有效分析文章內容
+1. 能夠根據需求去爬取所需的文章 --fetch mode
+2. 有效分析文章內容 --query mode 
 
 ## 電子商城推薦 Node
 1. 爬取資料
