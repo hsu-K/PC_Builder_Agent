@@ -18,6 +18,22 @@ from pc_builder_agent.tools.scraper import (
     save_articles_to_disk,
 )
 
+# 零件中文標籤對照表（對應 scraper.py 中的 key）
+COMPONENT_LABELS: dict[str, str] = {
+    "cpu": "CPU",
+    "mb": "主機板",
+    "ram": "記憶體",
+    "vga": "顯示卡",
+    "cooler": "散熱器",
+    "ssd": "SSD",
+    "hdd": "HDD",
+    "psu": "電源",
+    "chassis": "機殼",
+    "monitor": "螢幕",
+    "mouse_kb": "鼠鍵",
+    "os": "作業系統",
+}
+
 
 def pc_board_scraper_node(
     state: dict,
@@ -52,11 +68,15 @@ def pc_board_scraper_node(
 def _fetch_and_save_articles(
     state: dict,
     profile_id: str,
-    model_name: str | None,
+    model_name: str | None = None,  # kept for interface compatibility
     *,
     debug: bool = False,
 ) -> dict[str, Any]:
-    """爬取模式：直接從 PTT 爬取最新熱門菜單文章並存本地（跳過 LLM 浪費 token）"""
+    """爬取模式：直接從 PTT 爬取最新熱門菜單文章並存本地（跳過 LLM 浪費 token）
+
+    Note:
+        model_name is kept for interface compatibility with other node signatures.
+    """
 
     preferences = state.get("preferences", {})
     budget = preferences.get("budget")
@@ -164,92 +184,60 @@ def _query_local_articles(
     }
 
 
-def _analyze_articles(articles: list[dict]) -> str:
-    """分析文章內容，按預算範圍分組、擷取所有零件資訊，產出結構化報表（含社群評價分析）"""
+def _classify_budget(val: int) -> str:
+    """將金額分類為 low / medium / high"""
+    if val < 30000:
+        return "low"
+    if val <= 60000:
+        return "medium"
+    return "high"
 
-    budget_categories: dict[str, list[dict]] = {"low": [], "medium": [], "high": []}
 
-    # 零件中文標籤對照表（對應 scraper.py 中的 key）
-    COMPONENT_LABELS: dict[str, str] = {
-        "cpu": "CPU",
-        "mb": "主機板",
-        "ram": "記憶體",
-        "vga": "顯示卡",
-        "cooler": "散熱器",
-        "ssd": "SSD",
-        "hdd": "HDD",
-        "psu": "電源",
-        "chassis": "機殼",
-        "monitor": "螢幕",
-        "mouse_kb": "鼠鍵",
-        "os": "作業系統",
-    }
-    all_components: dict[str, list[str]] = {key: [] for key in COMPONENT_LABELS}
+def _fallback_budget_classify(article: dict, categories: dict[str, list]) -> None:
+    """舊資料相容：從內文 regex 解析價格並分類"""
+    import re
 
-    for article in articles:
-        # 使用預先推論的預算區間（若無則用舊邏輯 regex 解析價格）
-        inferred_range = article.get("inferred_budget_range")
-        if inferred_range and inferred_range in ("low", "medium", "high"):
-            budget_categories[inferred_range].append(article)
+    content = article.get("content", "")
+    title = article.get("title", "")
+    combined = title + " " + content
+    total_match = re.search(r"總價[^0-9]*(\d+[,]?\d*)", combined)
+    if total_match:
+        val = int(total_match.group(1).replace(",", ""))
+        categories[_classify_budget(val)].append(article)
+    else:
+        k_match = re.search(r"(\d+)\s*[kK]", combined)
+        if k_match:
+            val = int(k_match.group(1)) * 1000
+            categories[_classify_budget(val)].append(article)
         else:
-            # 舊資料相容：從內文解析價格
-            import re
+            categories["medium"].append(article)
 
-            content = article.get("content", "")
-            title = article.get("title", "")
-            combined = title + " " + content
-            total_match = re.search(r"總價[^0-9]*(\d+[,]?\d*)", combined)
-            if total_match:
-                val = int(total_match.group(1).replace(",", ""))
-                if val < 30000:
-                    budget_categories["low"].append(article)
-                elif val <= 60000:
-                    budget_categories["medium"].append(article)
-                else:
-                    budget_categories["high"].append(article)
-            else:
-                k_match = re.search(r"(\d+)\s*[kK]", combined)
-                if k_match:
-                    val = int(k_match.group(1)) * 1000
-                    if val < 30000:
-                        budget_categories["low"].append(article)
-                    elif val <= 60000:
-                        budget_categories["medium"].append(article)
-                    else:
-                        budget_categories["high"].append(article)
-                else:
-                    budget_categories["medium"].append(article)
 
-        # 從結構化欄位讀取零件
-        article_components: dict[str, str] = dict(article.get("components", {}) or {})
-        article["_components"] = article_components
-
-        for key in COMPONENT_LABELS:
-            if key in article_components:
-                all_components[key].append(article_components[key])
-
-    # 建構報表
-    budget_labels = {
+def _build_budget_lines(categories: dict[str, list[dict]]) -> list[str]:
+    """建構預算分布報表行"""
+    labels = {
         "low": "低預算 (< 30K)",
         "medium": "中預算 (30K ~ 60K)",
         "high": "高預算 (> 60K)",
     }
-    lines = ["## 📋 文章分析報告\n"]
-    lines.append("### 預算分布")
+    lines = ["### 預算分布"]
     for cat in ("low", "medium", "high"):
-        items = budget_categories[cat]
+        items = categories[cat]
         if items:
-            lines.append(f"- **{budget_labels[cat]}**: {len(items)} 篇")
+            lines.append(f"- **{labels[cat]}**: {len(items)} 篇")
             for a in items:
                 lines.append(f"  - {a.get('title', 'N/A')}")
     lines.append("")
+    return lines
 
-    lines.append("### 各文章完整配置")
-    lines.append("")
+
+def _build_config_lines(articles: list[dict]) -> list[str]:
+    """建構各文章完整配置報表行"""
+    lines = ["### 各文章完整配置", ""]
     for article in articles:
         title = article.get("title", "N/A")
         lines.append(f"**{title}**")
-        comps = article.get("_components", {})
+        comps = article.get("components", {})
         if comps:
             for key, label in COMPONENT_LABELS.items():
                 if key in comps:
@@ -257,10 +245,14 @@ def _analyze_articles(articles: list[dict]) -> str:
         else:
             lines.append("  - 未偵測到零件資訊")
         lines.append("")
+    return lines
 
-    lines.append("---")
-    lines.append("### 零件配置統計")
-    lines.append("")
+
+def _build_stats_lines(
+    all_components: dict[str, list[str]], budget_hit: int, total_articles: int
+) -> list[str]:
+    """建構零件配置統計 + 配置多樣性報表行"""
+    lines = ["---", "### 零件配置統計", ""]
     for key, label in COMPONENT_LABELS.items():
         items = all_components[key]
         if items:
@@ -274,31 +266,28 @@ def _analyze_articles(articles: list[dict]) -> str:
             lines.append(f"**{label}** — 未偵測到")
         lines.append("")
 
-    lines.append("### 配置多樣性")
-    lines.append(f"- 文章總數：{len(articles)} 篇")
     non_empty = sum(1 for v in all_components.values() if v)
+    lines.append("### 配置多樣性")
+    lines.append(f"- 文章總數：{total_articles} 篇")
     lines.append(f"- 涵蓋零件類型：{non_empty} / {len(COMPONENT_LABELS)} 種")
-    budget_hit = sum(1 for v in budget_categories.values() if v)
     lines.append(f"- 涵蓋預算區間：{budget_hit} 個")
+    return lines
 
-    # ================================================================
-    # 社群評價分析（推噓文情感分析）
-    # ================================================================
-    lines.append("")
-    lines.append("### 社群評價分析")
 
+def _build_sentiment_lines(articles: list[dict]) -> list[str]:
+    """建構社群評價分析報表行"""
     total_push = sum(a.get("push_count", 0) for a in articles)
     total_boo = sum(a.get("boo_count", 0) for a in articles)
     total_neutral = sum(a.get("neutral_count", 0) for a in articles)
     total_comments = total_push + total_boo + total_neutral
 
+    lines = ["", "### 社群評價分析"]
     lines.append(
         f"- 總推文數：{total_push} 推 / {total_boo} 噓 / {total_neutral} 中立 → 共 {total_comments} 則"
     )
-
     if total_push + total_boo > 0:
-        overall_ratio = total_push / (total_push + total_boo) * 100
-        lines.append(f"- 整體好評率：{overall_ratio:.0f}%（推 / (推+噓)）")
+        ratio = total_push / (total_push + total_boo) * 100
+        lines.append(f"- 整體好評率：{ratio:.0f}%（推 / (推+噓)）")
 
     lines.append("")
     lines.append("#### 各文章社群反響")
@@ -319,7 +308,6 @@ def _analyze_articles(articles: list[dict]) -> str:
         lines.append(f"  - {title}")
         lines.append(f"    推 {pc} / 噓 {bc} / 中立 {nc} {sentiment}")
 
-        # 列出代表性推文（最多 3 則）
         pushes = article.get("pushes", [])
         key_pushes = [p for p in pushes if p.get("tag") in ("推", "噓")][:3]
         for p in key_pushes:
@@ -327,13 +315,11 @@ def _analyze_articles(articles: list[dict]) -> str:
 
     lines.append("")
     lines.append("#### 常見建議與關鍵字")
-    # 從推文中提取常見字詞做簡單的頻率分析
     all_push_texts = []
     for article in articles:
         for p in article.get("pushes", []):
             all_push_texts.append(p.get("content", ""))
 
-    # 簡單的關鍵字統計
     keyword_counts = {}
     suggestion_keywords = [
         "散熱",
@@ -360,6 +346,36 @@ def _analyze_articles(articles: list[dict]) -> str:
             lines.append(f"  - 「{kw}」被提及 {count} 次")
     else:
         lines.append("  - 暫無足夠推文進行關鍵字分析")
+
+    return lines
+
+
+def _analyze_articles(articles: list[dict]) -> str:
+    """分析文章內容，按預算範圍分組、擷取所有零件資訊，產出結構化報表（含社群評價分析）"""
+    # --- 分類預算 ---
+    categories = {"low": [], "medium": [], "high": []}
+    for article in articles:
+        inferred_range = article.get("inferred_budget_range")
+        if inferred_range in ("low", "medium", "high"):
+            categories[inferred_range].append(article)
+        else:
+            _fallback_budget_classify(article, categories)
+
+    # --- 彙總零件 ---
+    all_components: dict[str, list[str]] = {key: [] for key in COMPONENT_LABELS}
+    for article in articles:
+        article_components: dict[str, str] = dict(article.get("components", {}) or {})
+        for key in COMPONENT_LABELS:
+            if key in article_components:
+                all_components[key].append(article_components[key])
+
+    # --- 建構報表 ---
+    budget_hit = sum(1 for v in categories.values() if v)
+    lines = ["## 📋 文章分析報告\n"]
+    lines.extend(_build_budget_lines(categories))
+    lines.extend(_build_config_lines(articles))
+    lines.extend(_build_stats_lines(all_components, budget_hit, len(articles)))
+    lines.extend(_build_sentiment_lines(articles))
 
     return "\n".join(lines)
 

@@ -136,31 +136,31 @@ def test_query_mode_analysis():
     print("\n✓ Test 4 完成\n")
 
 
-def test_fetch_mode_fallback():
-    """Test 5: 驗證 fetch 模式在無 LLM 情境下的工具回退"""
+def test_direct_scraper_and_persistence():
+    """Test 5: 驗證直接工具呼叫 + 儲存/讀取週期"""
     print("=" * 70)
-    print("Test 5: Fetch 模式工具回退機制")
+    print("Test 5: 直接工具呼叫與儲存/讀取週期")
     print("=" * 70)
 
-    # 模擬 LLM 不傳回 JSON 的情境，直接測試工具回退
     preferences = {"budget": "80k", "use_case": "剪輯"}
     result = pc_board_scraper.invoke(preferences)
     articles = normalize_articles_payload(result)
 
     print(f"\n工具直接回傳 {len(articles)} 篇 {preferences['use_case']} 相關文章:")
     for a in articles:
-        cpu = ""
-        gpu = ""
-        content = a.get("content", "")
-        for line in content.split("\n"):
-            if "CPU" in line and "：:" in line:
-                cpu = line.split("：")[-1].strip() if "：" in line else ""
-            if "VGA" in line and "：:" in line:
-                gpu = line.split("：")[-1].strip() if "：" in line else ""
+        comps = a.get("components", {})
+        cpu = comps.get("cpu", "N/A")
+        gpu = comps.get("vga", "N/A")
         print(f"  [{a.get('id', 'N/A')}] {a.get('title', 'N/A')}")
         print(f"      作者：{a.get('author', 'N/A')} ｜ 日期：{a.get('date', 'N/A')}")
-        if a.get("comments"):
-            print(f"      推文數：{len(a['comments'].split(chr(10)))}")
+        # pushes count already stored - use it directly
+        push_c = a.get("push_count", 0)
+        boo_c = a.get("boo_count", 0)
+        neutral_c = a.get("neutral_count", 0)
+        total = push_c + boo_c + neutral_c
+        print(
+            f"      推文統計：{push_c} 推 / {boo_c} 噓 / {neutral_c} 中立 (共 {total} 則)"
+        )
 
     # 驗證 save/load 週期
     save_articles_to_disk(articles, "test_fallback")
@@ -179,7 +179,7 @@ def main():
     test_direct_tool_call()
     test_analyze_articles()
     test_query_mode_analysis()
-    test_fetch_mode_fallback()
+    test_direct_scraper_and_persistence()
 
     if has_api_key:
         test_fetch_mode()
