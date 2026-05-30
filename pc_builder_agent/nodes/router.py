@@ -147,18 +147,24 @@ def _route_targets_for_request(state: dict) -> tuple[list[str], str]:
     pc_board_query_attempted = bool(state.get("pc_board_query_attempted"))
 
     if need_pc_board_query and not pc_board_loaded and not pc_board_query_attempted:
+        # 第一次需要查文章：保留 planner 提供的 reason（若有），或使用預設啟動查詢文案
         return ["pc_board_scraper"], reason or summary or "需要先讀取 PC_Board 文章再進行分析"
 
     if need_pc_board_query and pc_board_loaded:
+        # 文章已載入：不要沿用 planner 的 reason，使用明確的 post-query reason
         targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
-        return targets, reason or summary or "文章已載入，接續由專家分析差異"
+        post_reason = summary or f"文章已載入，接續啟動 {', '.join(targets)} 進行分析"
+        return targets, post_reason
 
     if need_pc_board_query and pc_board_query_attempted and not pc_board_loaded:
+        # 查詢過但本地沒有文章：降級為直接由專家分析（不要使用 planner 原始 reason）
         targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
-        return targets, reason or summary or "本地未找到文章，改由專家根據目前需求分析"
+        downgrade_reason = summary or "本地未找到文章，改由專家根據目前需求直接分析"
+        return targets, downgrade_reason
 
     if specialist_targets:
-        return specialist_targets, reason or summary or "依 planner 計畫啟動專家"
+        # 若 planner 指定 specialist，使用 planner 的 summary 作為說明，但避免沿用 planner 的 detailed reason
+        return specialist_targets, summary or "依 planner 計畫啟動專家"
 
     return _keyword_fallback_route_targets(state)
 
