@@ -12,6 +12,8 @@
 ## 前端應用介面
 1. 使用這可互動的前端介面
 
+## 驗證 Node
+
 ## graph流程優化
 1. 目前呼叫pc_board_scraper query mode 的流程不夠完善
 
