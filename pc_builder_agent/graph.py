@@ -42,9 +42,10 @@ class BuildState(TypedDict, total=False):
         profile_id (str): 使用者 ID，用於查詢和保存偏好設定
         preferences (dict): 從 preference.json 讀取的使用者偏好
         pc_board_results (list): 從 PC_Board Scraper 爬取的文章列表
+        pc_board_query_attempted (bool): 是否已嘗試執行過 PC_Board 查詢
         request (str): 使用者最新的 PC 組裝需求
         messages (Annotated[list[BaseMessage]]): 完整的對話歷史
-        plan (str): planner agent 的分析結果
+        plan (str): planner agent 輸出的 JSON 計畫
         route_targets (list[str]): router 選中的 subAgent 名稱
         route_reason (str): router 做出此選擇的原因
         cpu_advice (str): CPU specialist 的建議
@@ -55,6 +56,7 @@ class BuildState(TypedDict, total=False):
     profile_id: str
     preferences: dict
     pc_board_results: list
+    pc_board_query_attempted: bool
     request: str
     messages: Annotated[list[BaseMessage], add_messages]
     plan: str
@@ -91,25 +93,29 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     """
     建構完整的 LangGraph 工作流程
     
-    執行流程圖：
-    
-        START
-          ↓
-        planner (理解需求，查詢/保存偏好)
-          ↓
-        router (根據需求選擇要啟動哪些 subAgent)
-            ↓
-        ┌─────────────────────────┐
-        ↓                         ↓
-    pc_board_scraper     ┌─────────────────┐
-        ↓                ↓                 ↓
-       END          cpu_specialist    gpu_specialist (依需求 fan-out)
-                       ↓                 ↓
-                       └─────────────────┘
-                         ↓
-                       integrator (整合所有建議)
-                         ↓
-                        END
+        執行流程圖：
+
+                START
+                    ↓
+                planner (理解需求並產生查詢/分析計畫)
+                    ↓
+                router (決定先查文章或直接啟動 specialist)
+                    ↓
+            ┌────────────────────────────────────────────────────┐
+            │                                                    │
+            │ 若需要先查文章且尚未載入：                            │
+            │   pc_board_scraper (query 模式讀取/解讀本地文章)     │
+            │                    ↓                               │
+            │                  router (再次判斷下一步)            │
+            │                                                    │
+            └────────────────────────────────────────────────────┘
+                                                    ↓
+                             cpu_specialist / gpu_specialist
+                                        (依需求 fan-out)
+                                                    ↓
+                                            integrator (整合所有建議)
+                                                    ↓
+                                                 END
     
     Args:
         model_name: 使用的 OpenAI 模型名稱
@@ -131,7 +137,7 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "router")
     graph.add_conditional_edges("router", _dispatch_specialists)
-    graph.add_edge("pc_board_scraper", END)
+    graph.add_edge("pc_board_scraper", "router")
     graph.add_edge("cpu_specialist", "integrator")
     graph.add_edge("gpu_specialist", "integrator")
     graph.add_edge("integrator", END)

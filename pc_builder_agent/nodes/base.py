@@ -48,8 +48,18 @@ def _state_summary(state: dict) -> str:
     for article in pc_board_results[:5]:
         title = article.get("title", "N/A")
         content = article.get("content", "")
-        excerpt = content[:120].replace("\n", " ")
-        board_lines.append(f"- {title}: {excerpt}")
+        comments = article.get("comments", "")
+        content_excerpt = content[:1200].strip()
+        comments_excerpt = comments[:500].strip()
+        board_lines.append(
+            "- Title: {title}\n"
+            "  Content:\n{content}\n"
+            "  Comments:\n{comments}".format(
+                title=title,
+                content=content_excerpt or "(無內容)",
+                comments=comments_excerpt or "(無留言)",
+            )
+        )
 
     if not board_lines:
         board_lines = ["- 尚未載入 PC_Board 文章"]

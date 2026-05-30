@@ -1,17 +1,15 @@
 """
-Router Node - 根據需求決定啟動哪些 subAgent
+Router Node - 根據 planner 產生的計畫決定下一步要啟動哪些 subAgent。
 
 職責：
-- 使用 LLM 的語意理解決定要啟動哪些專家
-- 備援關鍵字匹配以防 LLM 失敗
-- 支持路由到 pc_board_scraper 進行文章查詢
-- 返回選中的 subAgent 名稱和路由原因
+- 先判斷是否需要讀取 PC_Board 文章
+- 若需要且尚未載入文章，先路由到 pc_board_scraper
+- 文章已載入後，再路由到對應的 specialist
+- 提供備援關鍵字路由，避免 plan 格式不完整時失效
 """
 
 import json
 from typing import Any
-from langchain_core.messages import HumanMessage, SystemMessage
-from pc_builder_agent.nodes.base import build_model, message_text
 
 
 # 常數定義
@@ -39,17 +37,92 @@ def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+def _parse_plan(plan_text: str) -> dict[str, Any]:
+    """將 planner 輸出的 JSON 計畫轉成 dict。"""
+
+    if not plan_text:
+        return {}
+
+    raw = plan_text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw.replace("json\n", "", 1).strip()
+
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return {}
+        try:
+            parsed = json.loads(raw[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+
+def _normalize_targets(targets: Any) -> list[str]:
+    """過濾非法節點並去重，保持順序。"""
+
+    if isinstance(targets, str):
+        targets = [targets]
+    if not isinstance(targets, list):
+        return []
+
+    filtered_targets: list[str] = []
+    for target in targets:
+        if target in AVAILABLE_SPECIALISTS and target not in filtered_targets:
+            filtered_targets.append(target)
+    return filtered_targets
+
+
+def _extract_plan_targets(state: dict) -> tuple[list[str], bool, str, str]:
+    """從 planner 計畫中抽出後續路由資訊。"""
+
+    plan_data = _parse_plan(state.get("plan", ""))
+    need_pc_board_query = bool(plan_data.get("need_pc_board_query"))
+    specialist_targets = _normalize_targets(plan_data.get("specialist_targets"))
+
+    reason = plan_data.get("reason", "")
+    if not isinstance(reason, str):
+        reason = ""
+
+    summary = plan_data.get("summary", "")
+    if not isinstance(summary, str):
+        summary = ""
+
+    return specialist_targets, need_pc_board_query, reason.strip(), summary.strip()
+
+
 def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
-    """LLM 路由失敗時的備援規則，基於關鍵字匹配"""
-    
+    """計畫格式不完整時的備援規則，基於關鍵字匹配。"""
+
     combined_text = "\n".join(
         part for part in [state.get("request", ""), state.get("plan", "")] if part
     ).lower()
+    pc_board_loaded = bool(state.get("pc_board_results"))
 
     # 優先檢查是否在查詢文章
     pc_board_match = _contains_keyword(combined_text, PC_BOARD_KEYWORDS)
-    if pc_board_match:
-        return ["pc_board_scraper"], "使用者想查看之前爬取的 PC_Board 文章"
+    if pc_board_match and not pc_board_loaded:
+        return ["pc_board_scraper"], "使用者想先查看或比較 PC_Board 文章，因此先讀取文章"
+
+    if pc_board_match and pc_board_loaded:
+        cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
+        gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS)
+
+        if cpu_match and gpu_match:
+            return ["cpu_specialist", "gpu_specialist"], "文章已載入，接續由 CPU 與 GPU 專家分析差異"
+
+        if gpu_match:
+            return ["gpu_specialist"], "文章已載入，接續由 GPU 專家分析差異"
+
+        if cpu_match:
+            return ["cpu_specialist"], "文章已載入，接續由 CPU 專家分析差異"
+
+        return list(DEFAULT_ROUTE_TARGETS), "文章已載入，接續啟動雙專家進行分析"
 
     cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
     gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS)
@@ -66,76 +139,28 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     return list(DEFAULT_ROUTE_TARGETS), "語意不明確，使用關鍵字備援後採用預設雙專家"
 
 
-def _route_targets_for_request(
-    state: dict,
-    *,
-    model_name: str | None = None,
-) -> tuple[list[str], str]:
-    """使用 LLM 的語意理解決定要啟動哪些 subAgent"""
-    
-    request = state.get("request", "")
-    plan = state.get("plan", "")
+def _route_targets_for_request(state: dict) -> tuple[list[str], str]:
+    """根據 planner 計畫決定路由目標。"""
 
-    system_prompt = (
-        "You are the PC Builder Router. "
-        "Decide which specialist nodes to activate based on the user's intent. "
-        "Available nodes are: cpu_specialist, gpu_specialist, pc_board_scraper. "
-        "Use pc_board_scraper when the user wants to query previously scraped articles. "
-        "Return JSON only, in this format: "
-        '{"targets": ["cpu_specialist"], "reason": "..."}. '
-        "The targets field must be a non-empty subset of available nodes. "
-        "Write the reason value in Traditional Chinese (zh-TW)."
-    )
-    user_prompt = (
-        "Decide which nodes are needed for the following context.\n\n"
-        f"request:\n{request}\n\n"
-        f"planner summary:\n{plan}\n"
-    )
+    specialist_targets, need_pc_board_query, reason, summary = _extract_plan_targets(state)
+    pc_board_loaded = bool(state.get("pc_board_results"))
+    pc_board_query_attempted = bool(state.get("pc_board_query_attempted"))
 
-    try:
-        model = build_model(model_name)
-        ai_message = model.invoke(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-        )
-        raw = message_text(ai_message).strip()
+    if need_pc_board_query and not pc_board_loaded and not pc_board_query_attempted:
+        return ["pc_board_scraper"], reason or summary or "需要先讀取 PC_Board 文章再進行分析"
 
-        # 嘗試解析 JSON，若失敗再嘗試擷取最外層 JSON
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise
-            parsed = json.loads(raw[start : end + 1])
+    if need_pc_board_query and pc_board_loaded:
+        targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
+        return targets, reason or summary or "文章已載入，接續由專家分析差異"
 
-        targets = parsed.get("targets", []) if isinstance(parsed, dict) else []
-        reason = parsed.get("reason", "") if isinstance(parsed, dict) else ""
+    if need_pc_board_query and pc_board_query_attempted and not pc_board_loaded:
+        targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
+        return targets, reason or summary or "本地未找到文章，改由專家根據目前需求分析"
 
-        if isinstance(targets, str):
-            targets = [targets]
-        if not isinstance(targets, list):
-            targets = []
+    if specialist_targets:
+        return specialist_targets, reason or summary or "依 planner 計畫啟動專家"
 
-        # 過濾非法節點並去重，保持順序
-        filtered_targets: list[str] = []
-        for target in targets:
-            if target in AVAILABLE_SPECIALISTS and target not in filtered_targets:
-                filtered_targets.append(target)
-
-        if not filtered_targets:
-            return _keyword_fallback_route_targets(state)
-
-        clean_reason = reason.strip() if isinstance(reason, str) else ""
-        if not clean_reason:
-            clean_reason = "由 LLM 根據需求語意判斷路由"
-
-        return filtered_targets, clean_reason
-    except Exception:
-        return _keyword_fallback_route_targets(state)
+    return _keyword_fallback_route_targets(state)
 
 
 def router_node(
@@ -145,9 +170,9 @@ def router_node(
     debug: bool = False,
 ) -> dict[str, Any]:
     """Router Node 的執行函數"""
-    
-    route_targets, route_reason = _route_targets_for_request(state, model_name=model_name)
-    
+
+    route_targets, route_reason = _route_targets_for_request(state)
+
     if debug:
         print("Router Node Route Targets:", route_targets)
         print("Router Node Route Reason:", route_reason)

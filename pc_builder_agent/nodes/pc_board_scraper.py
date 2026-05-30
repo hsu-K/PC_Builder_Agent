@@ -134,6 +134,8 @@ def _query_local_articles(
     if not local_articles:
         return {
             "messages": [],
+            "pc_board_results": [],
+            "pc_board_query_attempted": True,
             "pc_board_response": "尚未爬取 PC_Board 文章。請先執行初始化爬取。",
         }
     
@@ -168,6 +170,8 @@ def _query_local_articles(
     
     return {
         "messages": [ai_message],
+        "pc_board_results": local_articles,
+        "pc_board_query_attempted": True,
         "pc_board_response": response_text,
     }
 

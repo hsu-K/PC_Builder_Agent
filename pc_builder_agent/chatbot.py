@@ -190,9 +190,8 @@ def run_chat(
 
             
             # 從結果中取出回應
-            # 如果是查詢文章，優先使用 pc_board_response
-            # 否則使用 final_answer
-            response = result.get("pc_board_response") or result.get("final_answer", "")
+            # 優先使用整合後的 final_answer，查詢失敗時再退回 pc_board_response
+            response = result.get("final_answer") or result.get("pc_board_response") or ""
             
             if not response:
                 response = "無法生成回應，請重新嘗試。"
