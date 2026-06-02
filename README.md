@@ -24,7 +24,6 @@ PC Builder Agent 是一個以節點（node）與工具（tool）為核心的模�
   - **`chatbot.py`, `cli.py`**: 與使用者互動的入口元件。
   - **`data/articles/`**: 預設或已儲存的文章資料。
 
-
 ## 運作流程（可直接到graph.py查看詳細流程）
 
 1. 首先從`preference.json`讀取使用者的偏好
@@ -59,16 +58,16 @@ uv run main.py --debug
 3. 節點可使用 `run_agent_turn()` 與 LLM 互動；必要時把工具（tool）傳入 `tools=[...]`。
 
 注意事項：
+
 - 回傳格式應該一致且可被 router 或其他 node 消費（例如包含 `messages`、或 `response` 欄位）。
 
 ### 如何新增一個 Tool（工具），範例請參考 tool_template.py
 
 1. 在 `pc_builder_agent/tools/` 下新增檔案並在 `__init__.py` 中匯出工具。
 
-
 工具使用建議：
-- 工具應保持純粹、單一職責，並避免直接修改 global state；node 負責串接工具結果並決定是否儲存。
 
+- 工具應保持純粹、單一職責，並避免直接修改 global state；node 負責串接工具結果並決定是否儲存。
 
 ## 共同開發流程
 
