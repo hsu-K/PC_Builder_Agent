@@ -12,6 +12,8 @@ from typing import Any
 from pc_builder_agent.nodes.base import run_agent_turn
 
 
+specialist = ["cpu_specialist", "gpu_specialist"]
+
 def planner_node(
     state: dict,
     *,
@@ -40,7 +42,7 @@ def planner_node(
     )
     
     if debug:
-        print("Planner Node AI Message:", ai_message)
+        # print("Planner Node AI Message:", ai_message)
         print("Planner Node Text Output:", text)
         print("===============================================================")
 

@@ -31,6 +31,20 @@ PC_BOARD_KEYWORDS = (
     "之前", "爬取", "查看", "看看", "告訴我", "有什麼", "介紹",
 )
 
+ARTICLE_TASK_KEYWORDS = (
+    "compare_articles",
+    "analyze_article_configuration",
+    "article_query",
+    "第一篇",
+    "第二篇",
+    "文章內容",
+    "比較文章",
+    "分析文章",
+    "文章差異",
+    "配置內容",
+    "摘要",
+)
+
 
 def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     """判斷文字是否包含任一關鍵字"""
@@ -96,6 +110,28 @@ def _extract_plan_targets(state: dict) -> tuple[list[str], bool, str, str]:
     return specialist_targets, need_pc_board_query, reason.strip(), summary.strip()
 
 
+def _is_article_related_request(state: dict) -> bool:
+    """判斷目前需求是否屬於文章相關任務。"""
+
+    combined_text = "\n".join(
+        part for part in [state.get("request", ""), state.get("plan", "")] if part
+    ).lower()
+
+    if any(keyword.lower() in combined_text for keyword in ARTICLE_TASK_KEYWORDS):
+        return True
+
+    plan_data = _parse_plan(state.get("plan", ""))
+    task_type = plan_data.get("task_type", "")
+    if task_type in {"compare_articles", "analyze_article_configuration"}:
+        return True
+
+    article_query = plan_data.get("article_query", "")
+    if isinstance(article_query, str) and article_query.strip():
+        return True
+
+    return False
+
+
 def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     """計畫格式不完整時的備援規則，基於關鍵字匹配。"""
 
@@ -142,21 +178,45 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
 def _route_targets_for_request(state: dict) -> tuple[list[str], str]:
     """根據 planner 計畫決定路由目標。"""
 
+    # 先從 planner 的計畫中取得路由資訊，這是最正式且優先的來源
     specialist_targets, need_pc_board_query, reason, summary = _extract_plan_targets(state)
-    pc_board_loaded = bool(state.get("pc_board_results"))
-    pc_board_query_attempted = bool(state.get("pc_board_query_attempted"))
 
-    if need_pc_board_query and not pc_board_loaded and not pc_board_query_attempted:
-        # 第一次需要查文章：保留 planner 提供的 reason（若有），或使用預設啟動查詢文案
+    # 判斷是否已經載入 PC_Board 文章，以及是否需要去查詢文章
+    pc_board_loaded = bool(state.get("pc_board_results"))
+
+    # 目前先取消使用pc_board_query_attempted
+    # pc_board_query_attempted = bool(state.get("pc_board_query_attempted"))
+
+    # 根據pc_board_response來判斷是否已經取得查詢回應
+    pc_board_get_response = bool(state.get("pc_board_response"))
+    # if pc_board_get_response:
+    #     print("已經取得查詢回應")
+    # else:
+    #     print("尚未取得查詢回應")
+
+
+    
+    # 由router判斷是否為文章相關需求，這會影響是否優先查詢 scraper，但跟plan的need_pc_board_query不完全相同(目前先移除)
+    # article_related = _is_article_related_request(state)
+
+    # if article_related and not pc_board_query_attempted:
+    #     return ["pc_board_scraper"], reason or summary or "文章相關需求，先查詢 PC_Board 內容"
+    
+
+    # if need_pc_board_query and not pc_board_query_attempted:
+    if need_pc_board_query and not pc_board_get_response:
+        # 文章相關任務在每回合都先查詢一次 scraper，再交給 specialist
         return ["pc_board_scraper"], reason or summary or "需要先讀取 PC_Board 文章再進行分析"
 
-    if need_pc_board_query and pc_board_loaded:
-        # 文章已載入：不要沿用 planner 的 reason，使用明確的 post-query reason
+    # if need_pc_board_query and pc_board_loaded:
+    if need_pc_board_query and pc_board_get_response:
+        # 查詢已經完畢或是不需要查詢，接續由專家分析
         targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
-        post_reason = summary or f"文章已載入，接續啟動 {', '.join(targets)} 進行分析"
+        post_reason = summary or f"接續啟動 {', '.join(targets)} 進行分析"
         return targets, post_reason
 
-    if need_pc_board_query and pc_board_query_attempted and not pc_board_loaded:
+    # if need_pc_board_query and pc_board_query_attempted and not pc_board_loaded:
+    if need_pc_board_query and not pc_board_loaded:
         # 查詢過但本地沒有文章：降級為直接由專家分析（不要使用 planner 原始 reason）
         targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
         downgrade_reason = summary or "本地未找到文章，改由專家根據目前需求直接分析"
@@ -182,7 +242,7 @@ def router_node(
     if debug:
         print("Router Node Route Targets:", route_targets)
         print("Router Node Route Reason:", route_reason)
-        print("===============================================================")
+        print("=" * 60)
 
     return {
         "route_targets": route_targets,

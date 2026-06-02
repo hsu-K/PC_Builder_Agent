@@ -23,14 +23,19 @@ def gpu_specialist_node(
     debug: bool = False,
 ) -> dict[str, Any]:
     """GPU Specialist Node 的執行函數"""
+
+    specialist_state = dict(state)
+    # 專家只讀取 pc_board_response 摘要，不直接讀整篇文章內容
+    specialist_state["pc_board_results"] = []
     
     ai_message, text = run_agent_turn(
-        state=state,
+        state=specialist_state,
         role_name="GPU specialist",
         system_prompt=(
             "Focus on GPU selection, display resolution, thermal behavior, and power requirements.\n"
             "If the request mentions gaming, AI, video editing, or creative workloads, prioritize GPU-driven decisions.\n"
-            "When PC_Board article data exists in the current state snapshot, use it directly for analysis.\n"
+            "When article context is needed, only use PC_Board query summary in pc_board_response.\n"
+            "Do not assume any article details that are not present in pc_board_response.\n"
             "Call estimate_psu_wattage when needed.\n"
             "Explain the GPU selection direction clearly and concretely.\n"
             "The final answer must be in Traditional Chinese (zh-TW)."

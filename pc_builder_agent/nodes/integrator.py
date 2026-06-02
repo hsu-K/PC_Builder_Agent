@@ -33,15 +33,15 @@ def integrator_node(
         ),
         HumanMessage(
             content=(
-                f"User request: {state.get('request', '')}\n\n"
-                f"Planner: {state.get('plan', '')}\n\n"
-                f"Router targets: {', '.join(state.get('route_targets', []))}\n"
-                f"Router reason: {state.get('route_reason', '')}\n\n"
-                f"PC_Board response: {state.get('pc_board_response', '')}\n\n"
-                f"PC_Board results: {state.get('pc_board_results', '')}\n\n"
-                f"CPU specialist: {state.get('cpu_advice', '')}\n\n"
-                f"GPU specialist: {state.get('gpu_advice', '')}\n\n"
-                f"Known preferences: {format_profile_summary(state.get('profile_id', 'default'))}"
+                f"User request: {state.get("request", "")}\n\n"
+                f"Planner: {state.get("plan", "")}\n\n"
+                # f"Router targets: {', '.join(state.get('route_targets', []))}\n"
+                # f"Router reason: {state.get('route_reason', '')}\n\n"
+                f"PC_Board response: {state.get("pc_board_response", "")}\n\n"
+                # f"PC_Board results: {state.get("pc_board_results", "")}\n\n"
+                f"CPU specialist: {state.get("cpu_advice", "")}\n\n"
+                f"GPU specialist: {state.get("gpu_advice", "")}\n\n"
+                f"Known preferences: {format_profile_summary(state.get("profile_id", "default"))}"
             )
         ),
     ]

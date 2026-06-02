@@ -35,34 +35,38 @@ def conversation_messages(state: dict) -> list[BaseMessage]:
     return messages
 
 
+# 將preferences, pc_board_results, pc_board_response等都載入
 def _state_summary(state: dict) -> str:
     """將 state 中的重要資料整理成可讀摘要，注入給 agent 參考。"""
     preferences = state.get("preferences") or {}
     pc_board_results = state.get("pc_board_results") or []
+    pc_board_response = (state.get("pc_board_response") or "").strip()
 
     preference_lines = [f"- {key}: {value}" for key, value in preferences.items()]
     if not preference_lines:
         preference_lines = ["- 無偏好資料"]
 
-    board_lines = []
-    for article in pc_board_results[:5]:
-        title = article.get("title", "N/A")
-        content = article.get("content", "")
-        comments = article.get("comments", "")
-        content_excerpt = content[:1200].strip()
-        comments_excerpt = comments[:500].strip()
-        board_lines.append(
-            "- Title: {title}\n"
-            "  Content:\n{content}\n"
-            "  Comments:\n{comments}".format(
-                title=title,
-                content=content_excerpt or "(無內容)",
-                comments=comments_excerpt or "(無留言)",
+    board_lines = [f"- 已載入文章數量: {len(pc_board_results)}"]
+    if pc_board_results:
+        for index, article in enumerate(pc_board_results, 1):
+            title = article.get("title", "N/A")
+            author = article.get("author", "N/A")
+            date = article.get("date", "N/A")
+            url = article.get("url", "N/A")
+            content = article.get("content", "") or "(無內容)"
+            comments = article.get("comments", "") or "(無留言)"
+            board_lines.append(
+                f"- 文章 {index}: {title}\n"
+                f"  作者: {author}\n"
+                f"  日期: {date}\n"
+                f"  連結: {url}\n"
+                f"  內文:\n{content}\n"
+                f"  留言:\n{comments}"
             )
-        )
-
-    if not board_lines:
-        board_lines = ["- 尚未載入 PC_Board 文章"]
+    if pc_board_response:
+        board_lines.append(f"- 最新查詢摘要:\n{pc_board_response[:1500]}")
+    else:
+        board_lines.append("- 尚無本回合 PC_Board 查詢摘要")
 
     return (
         "Current state snapshot:\n"
@@ -114,7 +118,9 @@ def run_agent_turn(
 
         if debug:
             print(f"\n【{role_name} 回應】")
-            print(f"✓ AIMessage 內容:\n{ai_message}")
+            print(f"✓ AIMessage 內容:\n{message_text(ai_message)}")
+            print(f"✓ 工具呼叫: {ai_message.tool_calls}")
+            print("=" * 60)
         
         conversation.append(ai_message)
 
@@ -131,6 +137,11 @@ def run_agent_turn(
                 args["profile_id"] = state.get("profile_id", "default")
 
             result = tool.invoke(args)
+            if debug:
+                print(f"工具 {tool_name} 執行結果: {result}")
             conversation.append(
                 ToolMessage(content=str(result), tool_call_id=tool_call["id"])
             )
+        
+        if debug:
+            print("=" * 60)
