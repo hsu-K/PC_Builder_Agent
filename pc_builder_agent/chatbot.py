@@ -78,6 +78,10 @@ def prepare_session_state(
     )
     state.update(scraper_result)
 
+    # pc_board_query_attempted 用於標記是否已經嘗試過查詢文章，初始為 False
+    # state["pc_board_query_attempted"] = False
+
+    # 將爬取的文章結果存入記憶系統，目前不確定是否要採用
     # PROFILE_STORE.put(
     #     _profile_namespace(session_id),
     #     PROFILE_KEY,
@@ -87,13 +91,14 @@ def prepare_session_state(
     #         "pc_board_results": state.get("pc_board_results", []),
     #     },
     # )
+
     if preferences:
         print("✓ 已將偏好與 PC_Board 文章存入記憶系統")
 
     if state.get("pc_board_results"):
         print("\n【PC_Board 文章已載入到 State】")
         print(f"✓ 成功載入 {len(state['pc_board_results'])} 篇文章，供後續對話查詢")
-        for idx, article in enumerate(state["pc_board_results"][:5], 1):
+        for idx, article in enumerate(state["pc_board_results"][:len(state['pc_board_results'])], 1):
             print(f"  {idx}. {article.get('title', 'N/A')}")
 
     return state
@@ -123,15 +128,16 @@ def run_chat(
     print("PC Builder Agent - 初始化中...")
     print("=" * 60)
     
+    # ===== 步驟 1：載入偏好設定與爬取文章 =====
     state = prepare_session_state(session_id=session_id, model_name=model_name, debug=debug)
     
-    # ===== 步驟 4：建構 LangGraph 應用 =====
+    # ===== 步驟 2：建構 LangGraph 應用 =====
     app = build_graph(model_name=model_name, debug=debug)
     
     # 初始化訊息歷史
     messages_history = []
     
-    # ===== 步驟 5：進入聊天迴圈 =====
+    # ===== 步驟 3：進入聊天迴圈 =====
     print("\n" + "=" * 60)
     print("PC Builder Agent - 聊天模式")
     print("=" * 60)
@@ -164,6 +170,10 @@ def run_chat(
         print("\n[正在分析...]")
         
         try:
+            # 每回合先重置查詢旗標，讓文章相關任務先經過 pc_board_scraper
+            # state["pc_board_query_attempted"] = False
+            state["pc_board_response"] = ""
+
             # 呼叫 LangGraph 應用執行完整的 agent 分析流程
             # 傳入完整的 State，包含：
             #   - profile_id: 使用者 ID
@@ -181,18 +191,21 @@ def run_chat(
                 {
                     "profile_id": session_id,  # 使用者會話 ID
                     "preferences": state["preferences"],  # 偏好設定
-                    # "pc_board_results": state["pc_board_results"],  # 已爬取的文章
+                    "pc_board_response": state.get("pc_board_response", ""),
                     "request": user_input,  # 目前輪次的使用者需求
                     "messages": messages_history,  # 完整對話歷史
                 },
                 config={"configurable": {"thread_id": session_id}},
             )
 
+            # 更新本地 state，保留本輪的文章查詢結果供下一輪參考
+            # state["pc_board_results"] = result.get("pc_board_results", state.get("pc_board_results", []))
+            # state["pc_board_query_attempted"] = bool(result.get("pc_board_query_attempted", False))
+
             
             # 從結果中取出回應
-            # 如果是查詢文章，優先使用 pc_board_response
-            # 否則使用 final_answer
-            response = result.get("pc_board_response") or result.get("final_answer", "")
+            # 優先使用整合後的 final_answer，查詢失敗時再退回 pc_board_response
+            response = result.get("final_answer") or result.get("pc_board_response") or ""
             
             if not response:
                 response = "無法生成回應，請重新嘗試。"

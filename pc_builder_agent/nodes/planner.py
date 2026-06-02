@@ -1,22 +1,18 @@
 """
-Planner Node - 理解需求並整理成可執行的組裝方向
+Planner Node - 只負責把使用者需求整理成 router 可執行的計畫。
 
 職責：
-- 理解使用者的 PC 組裝需求
-- 調用工具查詢既有偏好和估算電源需求
-- 明確提到預算、用途、噪音等時保存偏好
-- 輸出簡潔的需求分類和優先順序
+- 分析使用者需求的任務類型
+- 判斷是否需要先讀取 PC_Board 文章
+- 規劃後續應啟動的 specialist
+- 輸出結構化計畫，不直接解題
 """
 
 from typing import Any
 from pc_builder_agent.nodes.base import run_agent_turn
-from pc_builder_agent.tools import (
-    recall_user_preferences,
-    save_user_preference,
-    recall_pc_board_articles,
-    estimate_psu_wattage,
-)
 
+
+specialist = ["cpu_specialist", "gpu_specialist"]
 
 def planner_node(
     state: dict,
@@ -30,21 +26,23 @@ def planner_node(
         state=state,
         role_name="planner agent",
         system_prompt=(
-            "First understand the user's needs and turn them into an actionable PC build direction.\n"
-            "You must call recall_user_preferences first to load known preferences.\n"
-            "If the user asks about previously scraped articles or menus, call recall_pc_board_articles.\n"
-            "If the user explicitly mentions budget, use case, size, or other constraints, save them with save_user_preference.\n"
-            "If power estimation is needed, call estimate_psu_wattage.\n"
-            "Keep the output concise and focus on requirement categories, priorities, and risks.\n"
-            "The final answer must be in Traditional Chinese (zh-TW)."
+            "You are the planner for a PC building workflow.\n"
+            "Your job is not to solve the user's problem.\n"
+            "Analyze the request and produce a structured execution plan for router.\n"
+            "If the user wants to compare articles, find differences between articles, or inspect article contents before analysis, set need_pc_board_query to true.\n"
+            "When a PC_Board query is needed, describe the article_query clearly, such as first article vs second article, a specific board post, or relevant menu articles.\n"
+            "Choose downstream specialist_targets that should run after the query, such as cpu_specialist and gpu_specialist.\n"
+            "Return JSON only, with keys: task_type, need_pc_board_query, article_query, specialist_targets, comparison_axes, execution_order, summary, reason.\n"
+            "summary and reason must be in Traditional Chinese (zh-TW).\n"
+            "Do not include markdown fences, extra commentary, or direct recommendations."
         ),
-        tools=[recall_user_preferences, save_user_preference, recall_pc_board_articles, estimate_psu_wattage],
+        tools=[],
         model_name=model_name,
         debug=debug,
     )
     
     if debug:
-        print("Planner Node AI Message:", ai_message)
+        # print("Planner Node AI Message:", ai_message)
         print("Planner Node Text Output:", text)
         print("===============================================================")
 
