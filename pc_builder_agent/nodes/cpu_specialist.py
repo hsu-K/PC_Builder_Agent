@@ -12,7 +12,6 @@ from typing import Any
 from pc_builder_agent.nodes.base import run_agent_turn
 from pc_builder_agent.tools import (
     recall_user_preferences,
-    recall_pc_board_articles,
     estimate_psu_wattage,
 )
 
@@ -24,19 +23,24 @@ def cpu_specialist_node(
     debug: bool = False,
 ) -> dict[str, Any]:
     """CPU Specialist Node 的執行函數"""
+
+    specialist_state = dict(state)
+    # 專家只讀取 pc_board_response 摘要，不直接讀整篇文章內容
+    specialist_state["pc_board_results"] = []
     
     ai_message, text = run_agent_turn(
-        state=state,
+        state=specialist_state,
         role_name="CPU specialist",
         system_prompt=(
             "Focus on CPU, memory, motherboard, and overall platform balance.\n"
             "When usage patterns or preferences are found in memory, incorporate them.\n"
-            "If article details are relevant to the answer, call recall_pc_board_articles.\n"
+            "When article context is needed, only use PC_Board query summary in pc_board_response.\n"
+            "Do not assume any article details that are not present in pc_board_response.\n"
             "Call estimate_psu_wattage when needed to validate PSU headroom.\n"
             "Provide a practical recommendation that can be used directly.\n"
             "The final answer must be in Traditional Chinese (zh-TW)."
         ),
-        tools=[recall_user_preferences, recall_pc_board_articles, estimate_psu_wattage],
+        tools=[recall_user_preferences, estimate_psu_wattage],
         model_name=model_name,
         debug=debug,
     )
