@@ -11,3 +11,8 @@ wheels/
 .env
 .github
 pc_builder_agent/data/
+
+# 本地端 SQLite 資料庫(例如 ecommerce node 的 data/ecommerce.db,屬本地 demo 資料,不入版控)
+data/*.db
+data/*.sqlite
+data/*.sqlite3

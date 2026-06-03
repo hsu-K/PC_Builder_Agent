@@ -26,6 +26,7 @@ from pc_builder_agent.nodes import (
     gpu_specialist_node,
     integrator_node,
     pc_board_scraper_node,
+    ecommerce_node,
 )
 from pc_builder_agent.memory import PROFILE_STORE
 
@@ -50,6 +51,8 @@ class BuildState(TypedDict, total=False):
         cpu_advice (str): CPU specialist 的建議
         gpu_advice (str): GPU specialist 的建議
         pc_board_response (str): PC_Board Scraper 的查詢回應
+        ecommerce_advice (str): Ecommerce Recommendation Specialist 的商品/優惠建議
+        ecommerce_db_path (str): ecommerce 查詢使用的資料庫路徑(可選,主要供測試注入)
         final_answer (str): integrator 整合後的最終建議
     """
     profile_id: str
@@ -63,6 +66,8 @@ class BuildState(TypedDict, total=False):
     cpu_advice: str
     gpu_advice: str
     pc_board_response: str
+    ecommerce_advice: str
+    ecommerce_db_path: str
     final_answer: str
 
 
@@ -70,16 +75,28 @@ class BuildState(TypedDict, total=False):
 # 工作流程輔助函數
 # ============================================================================
 
+# 可並行 fan-out 並收斂到 integrator 的 specialist(pc_board_scraper 不在此列,它走短路 → END)
+FAN_OUT_SPECIALISTS = ("cpu_specialist", "gpu_specialist", "ecommerce")
+DEFAULT_FAN_OUT = ["cpu_specialist", "gpu_specialist"]
+
+
 def _dispatch_specialists(state: BuildState) -> list[Send]:
     """根據 router 結果，決定要並行執行哪些 subAgent"""
     # print(state)
-    targets = state.get("route_targets") or ["cpu_specialist", "gpu_specialist"]
-    
-    # 如果包含 pc_board_scraper，優先執行它
+    targets = state.get("route_targets") or DEFAULT_FAN_OUT
+
+    # 維持 pc_board_scraper 短路(MVP 已知限制):
+    # 只要 targets 含 pc_board_scraper，就只送 pc_board_scraper(它接 END，不進 integrator)。
     if "pc_board_scraper" in targets:
         return [Send("pc_board_scraper", dict(state))]
-    
-    return [Send(target, dict(state)) for target in targets]
+
+    # 非 pc_board 情況:cpu_specialist / gpu_specialist / ecommerce 都可並行 fan-out → integrator。
+    # 過濾掉未知 target 以避免 Send 到不存在的節點;若過濾後為空，退回原本預設雙專家。
+    dispatch_targets = [t for t in targets if t in FAN_OUT_SPECIALISTS]
+    if not dispatch_targets:
+        dispatch_targets = list(DEFAULT_FAN_OUT)
+
+    return [Send(target, dict(state)) for target in dispatch_targets]
 
 
 
@@ -125,6 +142,7 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_node("cpu_specialist", lambda state: cpu_specialist_node(state, model_name=model_name, debug=debug))
     graph.add_node("gpu_specialist", lambda state: gpu_specialist_node(state, model_name=model_name, debug=debug))
     graph.add_node("pc_board_scraper", lambda state: pc_board_scraper_node(state, model_name=model_name, mode="query", debug=debug))
+    graph.add_node("ecommerce", lambda state: ecommerce_node(state, model_name=model_name, debug=debug))
     graph.add_node("integrator", lambda state: integrator_node(state, model_name=model_name, debug=debug))
 
     # 定義邊（流程連接）
@@ -134,6 +152,7 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_edge("pc_board_scraper", END)
     graph.add_edge("cpu_specialist", "integrator")
     graph.add_edge("gpu_specialist", "integrator")
+    graph.add_edge("ecommerce", "integrator")
     graph.add_edge("integrator", END)
 
     # 編譯工作流程圖

@@ -16,9 +16,26 @@ from pc_builder_agent.memory import (
 )
 from pc_builder_agent.tools.hardware import estimate_psu_wattage
 from pc_builder_agent.tools.scraper import web_scrape, pc_board_scraper
+from pc_builder_agent.tools.ecommerce_tools import (
+    search_ecommerce_products,
+    find_ecommerce_deals_tool,
+    recommend_pc_build_tool,
+    search_ecommerce_promotions,
+    find_bundle_discount_pc_pairs,
+)
 
 # 所有工具統一在這裡匯總，Node 只需要查這份表
-ALL_TOOLS = [*MEMORY_TOOLS, estimate_psu_wattage, web_scrape, pc_board_scraper]
+ALL_TOOLS = [
+    *MEMORY_TOOLS,
+    estimate_psu_wattage,
+    web_scrape,
+    pc_board_scraper,
+    search_ecommerce_products,
+    find_ecommerce_deals_tool,
+    recommend_pc_build_tool,
+    search_ecommerce_promotions,
+    find_bundle_discount_pc_pairs,
+]
 TOOL_LOOKUP = {tool.name: tool for tool in ALL_TOOLS}
 
 __all__ = [
@@ -31,4 +48,9 @@ __all__ = [
     "estimate_psu_wattage",
     "web_scrape",
     "pc_board_scraper",
+    "search_ecommerce_products",
+    "find_ecommerce_deals_tool",
+    "recommend_pc_build_tool",
+    "search_ecommerce_promotions",
+    "find_bundle_discount_pc_pairs",
 ]
