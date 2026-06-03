@@ -328,6 +328,25 @@ def _fetch_list_entries_for_queries(
     return all_entries
 
 
+def _parse_article_date(url: str, list_date: str) -> str:
+    """從 PTT URL 的 Unix timestamp 推斷年份，組合成正確的 YYYY-MM-DD
+
+    PTT article URL: /bbs/PC_Shopping/M.1779872283.A.FDD.html
+    The number after "M." is a Unix timestamp. Extract it, convert to date.
+    list_date is the article list page date ("5/27", "11/07", etc.)
+    """
+    import datetime
+    # Extract timestamp from URL
+    match = re.search(r"/M\.(\d+)\.A\.", url)
+    if match:
+        ts = int(match.group(1))
+        dt = datetime.datetime.fromtimestamp(ts)
+        return dt.strftime("%Y-%m-%d")
+    # Fallback: use current year with list_date
+    current_year = datetime.datetime.now().year
+    return f"{current_year}-{list_date.replace('/', '-')}"
+
+
 def _fetch_article(session: requests.Session, entry: dict) -> dict | None:
     """爬取單一文章的內容與推文，回傳結構化 article dict；失敗回傳 None"""
     time.sleep(0.5)
@@ -376,7 +395,7 @@ def _fetch_article(session: requests.Session, entry: dict) -> dict | None:
         "title": entry["title"],
         "url": entry["url"],
         "author": entry["author"],
-        "date": f"2026-{entry['date']}",
+        "date": _parse_article_date(entry["url"], entry["date"]),
         "pulled_at": pulled_at,
         "content": clean_content,
         "components": components,
@@ -390,11 +409,11 @@ def _fetch_article(session: requests.Session, entry: dict) -> dict | None:
 
 
 def _parse_pushes(main_content: BeautifulSoup) -> tuple[list[dict], int, int, int]:
-    """從文章 parse 推噓文結構，回傳 (pushes, push_count, boo_count, neutral_count)"""
-    pushes: list[dict] = []
-    push_count = 0
-    boo_count = 0
-    neutral_count = 0
+    """從文章 parse 推噓文結構，同作者連續發言合併為一條
+
+    回傳 (pushes, push_count, boo_count, neutral_count)
+    """
+    raw_pushes: list[dict] = []
 
     for push_el in main_content.select(".push"):
         tag_el = push_el.select_one(".push-tag")
@@ -409,22 +428,34 @@ def _parse_pushes(main_content: BeautifulSoup) -> tuple[list[dict], int, int, in
         if raw_content.startswith(":"):
             raw_content = raw_content[1:].strip()
 
-        pushes.append(
-            {
-                "tag": tag,
-                "userid": userid,
-                "content": raw_content,
-                "ipdatetime": ipdatetime,
-            }
-        )
-        if tag == "推":
-            push_count += 1
-        elif tag == "噓":
-            boo_count += 1
-        else:
-            neutral_count += 1
+        raw_pushes.append({
+            "tag": tag,
+            "userid": userid,
+            "content": raw_content,
+            "ipdatetime": ipdatetime,
+        })
 
-    return pushes, push_count, boo_count, neutral_count
+    # 統計原始計數（不分合併）
+    push_count = sum(1 for p in raw_pushes if p["tag"] == "推")
+    boo_count = sum(1 for p in raw_pushes if p["tag"] == "噓")
+    neutral_count = sum(1 for p in raw_pushes if p["tag"] == "→")
+
+    # 合併同作者連續發言
+    merged: list[dict] = []
+    for p in raw_pushes:
+        if merged and merged[-1]["userid"] == p["userid"]:
+            merged[-1]["content"] += "\n" + p["content"]
+            merged[-1]["ipdatetime"] = p["ipdatetime"]
+            # 保留最高的 tag priority：噓 > 推 > →
+            existing_tag = merged[-1]["tag"]
+            if p["tag"] == "噓":
+                merged[-1]["tag"] = "噓"
+            elif p["tag"] == "推" and existing_tag == "→":
+                merged[-1]["tag"] = "推"
+        else:
+            merged.append(dict(p))
+
+    return merged, push_count, boo_count, neutral_count
 
 
 def _clean_article_content(main_content: BeautifulSoup) -> str:
@@ -479,13 +510,30 @@ def _infer_budget(content: str) -> tuple[int | None, str]:
     return val, "high"
 
 
+def _filter_within_months(entries: list[dict], months: int = 3) -> list[dict]:
+    """過濾出在指定月份內的文章"""
+    import datetime
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=months * 30)
+
+    filtered: list[dict] = []
+    for e in entries:
+        date_str = _parse_article_date(e["url"], e["date"])
+        try:
+            article_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            if article_date >= cutoff:
+                filtered.append(e)
+        except ValueError:
+            filtered.append(e)  # keep if can't parse
+    return filtered
+
+
 @tool
 def pc_board_scraper(budget: str | None = None, use_case: str | None = None) -> dict:
     """爬取 PTT PC_Shopping 版 [菜單] 文章，含推噓文分析與社群評價。
 
-    從最新文章、預算+用途搜尋、純用途搜尋三個來源收集文章，
-    去重後依討論熱度（|nrec|）排序，取熱門度最高的前 10 篇，
-    確保結果同時符合用途、預算區間與社群關注度。
+    從預算+用途搜尋、純用途搜尋兩個來源收集文章，
+    保留近三個月內的文章，去重後依討論熱度（|nrec|）排序，
+    取前 10 篇，確保結果同時符合用途、預算區間與時效性。
 
     Args:
         budget: 預算範圍 (如 "50k", "100k" 等)，用於搜尋預算相近的菜單
@@ -506,12 +554,6 @@ def pc_board_scraper(budget: str | None = None, use_case: str | None = None) -> 
         session = _create_ptt_session()
         raw_entries: list[dict] = []
         seen_urls: set[str] = set()
-
-        # 來源 1：最新熱門列表
-        for e in _fetch_list_entries(session):
-            if e["url"] not in seen_urls:
-                seen_urls.add(e["url"])
-                raw_entries.append(e)
 
         # 來源 2：預算+用途搜尋
         budget_k = _parse_budget_k(budget)
@@ -535,10 +577,27 @@ def pc_board_scraper(budget: str | None = None, use_case: str | None = None) -> 
                         seen_urls.add(e["url"])
                         raw_entries.append(e)
 
+        # 若無預算也無用途，仍需要基礎搜尋（搜尋「菜單」關鍵字）
+        if not budget_k and not use_case:
+            for e in _fetch_list_entries(session, search_query="菜單"):
+                if e["url"] not in seen_urls:
+                    seen_urls.add(e["url"])
+                    raw_entries.append(e)
+
         if not raw_entries:
             return {
                 "status": "error",
                 "message": "未在 PTT PC_Shopping 版找到任何 [菜單] 文章",
+                "articles_count": 0,
+                "articles": [],
+            }
+
+        # === 近三個月過濾 ===
+        raw_entries = _filter_within_months(raw_entries, months=3)
+
+        if not raw_entries:
+            return {
+                "status": "success",
                 "articles_count": 0,
                 "articles": [],
             }
