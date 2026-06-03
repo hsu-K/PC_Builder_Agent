@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +21,6 @@ from langchain_core.tools import tool
 @tool
 def web_scrape(url: str, selector: str | None = None) -> str:
     """抓取指定網址內容，若提供 selector 則只回傳對應區塊文字。"""
-
-    import requests
-    from bs4 import BeautifulSoup
 
     response = requests.get(
         url,
@@ -57,11 +54,12 @@ def _parse_nrec(nrec_el) -> int:
     text = nrec_el.get_text(strip=True)
     if not text:
         return 0
-    if text == "爆":
-        return 100
+
+    SPECIAL_NREC = {"爆": 100, "XX": -100}
+    if text in SPECIAL_NREC:
+        return SPECIAL_NREC[text]
+
     if text.startswith("X"):
-        if text == "XX":
-            return -100
         try:
             return -int(text[1:])
         except ValueError, IndexError:
@@ -75,11 +73,47 @@ def _parse_nrec(nrec_el) -> int:
 # 用途分類關鍵字對照表：use_case 觸發詞 → 標題應包含的關鍵字
 USE_CASE_KEYWORDS: dict[str, list[str]] = {
     "遊戲": ["遊戲", "game", "gaming"],
-    "工作": ["工作", "文書", "辦公", "work", "office"],
-    "文書": ["工作", "文書", "辦公", "work", "office"],
-    "剪輯": ["剪輯", "影片", "編輯", "edit", "editing", "video"],
-    "影片": ["剪輯", "影片", "編輯", "edit", "editing", "video"],
-    "ai": ["AI", "深度", "機器", "ML", "訓練", "inference", "deep", "learning", "llm"],
+    "工作": [
+        "工作",
+        "文書",
+        "辦公",
+        "work",
+        "office",
+    ],
+    "文書": [
+        "工作",
+        "文書",
+        "辦公",
+        "work",
+        "office",
+    ],
+    "剪輯": [
+        "剪輯",
+        "影片",
+        "編輯",
+        "edit",
+        "editing",
+        "video",
+    ],
+    "影片": [
+        "剪輯",
+        "影片",
+        "編輯",
+        "edit",
+        "editing",
+        "video",
+    ],
+    "ai": [
+        "AI",
+        "深度",
+        "機器",
+        "ML",
+        "訓練",
+        "inference",
+        "deep",
+        "learning",
+        "llm",
+    ],
     "深度": [
         "AI",
         "深度",
@@ -122,12 +156,9 @@ def _parse_budget_k(budget: str | None) -> int | None:
     if not budget:
         return None
     budget_str = str(budget).strip().lower()
-    if budget_str.endswith("k"):
-        try:
-            return int(float(budget_str[:-1]))
-        except ValueError, TypeError:
-            return None
     try:
+        if budget_str.endswith("k"):
+            return int(float(budget_str[:-1]))
         return int(float(budget_str)) // 1000
     except ValueError, TypeError:
         return None
@@ -136,32 +167,51 @@ def _parse_budget_k(budget: str | None) -> int | None:
 def _get_budget_range_queries(budget_k: int, use_case: str | None) -> list[str]:
     """根據預算 K 數與用途，產生預算區間搜尋詢問清單
 
-    例如 budget_k=50, use_case="遊戲" → ["40k遊戲", "45k遊戲", "50k遊戲", "55k遊戲", "60k遊戲"]
-    會用 PTT 搜尋這些關鍵字，找到預算相近的菜單。
+    搜尋詞依與使用者預算的接近程度排序，確保最相關的結果優先被搜尋。
+
+    例如 budget_k=50, use_case="遊戲" → ["50k遊戲", "45k遊戲", "55k遊戲", "40k遊戲", "60k遊戲", "35k遊戲", "65k遊戲"]
     """
     search_kw = _get_search_query(use_case) if use_case else None
     if not search_kw:
         return []
 
-    # 預算區間步階：-15K, -10K, -5K, 0, +5K, +10K, +15K
-    # 步長 5K，確保覆蓋足夠範圍但不會跳太遠
-    steps = list(range(-15, 20, 5))  # [-15, -10, -5, 0, 5, 10, 15]
+    # 預算區間步階：由近到遠擴散
+    # 先搜尋最接近預算的關鍵字，再逐步向外擴散
+    # 這樣當 _fetch_list_entries_for_queries 收集滿 15 篇停下來時，
+    # 最相關的結果已經被找到了
+    steps = [0, -5, 5, -10, 10, -15, 15]
 
-    queries: list[str] = []
-    for step in steps:
-        k = budget_k + step
-        if k >= 10:  # 不低於 10K
-            queries.append(f"{k}k{search_kw}")
-
-    # 去重（如果 steps 有重疊）
     seen = set()
     unique_queries: list[str] = []
-    for q in queries:
-        if q not in seen:
-            seen.add(q)
-            unique_queries.append(q)
+    for step in steps:
+        k = budget_k + step
+        if k >= 10:
+            q = f"{k}k{search_kw}"
+            if q not in seen:
+                seen.add(q)
+                unique_queries.append(q)
 
     return unique_queries
+
+
+def _extract_title_budget_k(title: str) -> int | None:
+    """從文章標題提取預算 K 數
+
+    例如 '[菜單] 120k白色遊戲機' → 120
+         '[菜單] 50k遊戲機' → 50
+         '[菜單] 80~90K遊戲機' → 80 (取第一個數字)
+         '[菜單] 主要玩天堂經典版-健檢' → None (無法判斷)
+    """
+    # Match patterns like "35k", "120K", "80~90k", "10-15k"
+    # First try range pattern (e.g., "80~90K" → capture 80)
+    match = re.search(r"(\d+)\s*[~\-]\s*\d+\s*[kK]", title)
+    if match:
+        return int(match.group(1))
+    # Fallback: simple pattern (e.g., "120k" → capture 120)
+    match = re.search(r"(\d+)\s*[kK]", title)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def _matches_use_case(title: str, use_case: str) -> bool:
@@ -220,7 +270,15 @@ def _create_ptt_session() -> requests.Session:
         headers=headers,
         timeout=10,
     )
+    # 手動設定 over18 cookie 作為備援，確保後續請求不會被擋
+    session.cookies.set("over18", "1", domain=".ptt.cc", path="/")
     return session
+
+
+def _normalize_ptt_url(href: Any) -> str:
+    """將 PTT 的相對網址轉為絕對網址"""
+    href_str = str(href) if href else ""
+    return f"https://www.ptt.cc{href_str}" if href_str.startswith("/") else href_str
 
 
 def _fetch_list_entries(
@@ -262,13 +320,7 @@ def _fetch_list_entries(
             if not title.startswith("[菜單]"):
                 continue
 
-            href = title_el.get("href", "")
-            href_str = str(href) if href else ""
-            full_url = (
-                f"https://www.ptt.cc{href_str}"
-                if href_str.startswith("/")
-                else href_str
-            )
+            full_url = _normalize_ptt_url(title_el.get("href", ""))
             author_el = r_ent.select_one(".author")
             author = author_el.get_text(strip=True) if author_el else ""
             date_el = r_ent.select_one(".date")
@@ -292,9 +344,7 @@ def _fetch_list_entries(
         prev_url = None
         for btn in paging_btns:
             if "上頁" in btn.get_text(strip=True):
-                h = btn.get("href", "")
-                hs = str(h) if h else ""
-                prev_url = f"https://www.ptt.cc{hs}" if hs.startswith("/") else hs
+                prev_url = _normalize_ptt_url(btn.get("href", ""))
                 break
         if prev_url:
             current_url = prev_url
@@ -335,15 +385,14 @@ def _parse_article_date(url: str, list_date: str) -> str:
     The number after "M." is a Unix timestamp. Extract it, convert to date.
     list_date is the article list page date ("5/27", "11/07", etc.)
     """
-    import datetime
     # Extract timestamp from URL
     match = re.search(r"/M\.(\d+)\.A\.", url)
     if match:
         ts = int(match.group(1))
-        dt = datetime.datetime.fromtimestamp(ts)
+        dt = datetime.fromtimestamp(ts)
         return dt.strftime("%Y-%m-%d")
     # Fallback: use current year with list_date
-    current_year = datetime.datetime.now().year
+    current_year = datetime.now().year
     return f"{current_year}-{list_date.replace('/', '-')}"
 
 
@@ -408,7 +457,7 @@ def _fetch_article(session: requests.Session, entry: dict) -> dict | None:
     }
 
 
-def _parse_pushes(main_content: BeautifulSoup) -> tuple[list[dict], int, int, int]:
+def _parse_pushes(main_content) -> tuple[list[dict], int, int, int]:
     """從文章 parse 推噓文結構，同作者連續發言合併為一條
 
     回傳 (pushes, push_count, boo_count, neutral_count)
@@ -428,12 +477,14 @@ def _parse_pushes(main_content: BeautifulSoup) -> tuple[list[dict], int, int, in
         if raw_content.startswith(":"):
             raw_content = raw_content[1:].strip()
 
-        raw_pushes.append({
-            "tag": tag,
-            "userid": userid,
-            "content": raw_content,
-            "ipdatetime": ipdatetime,
-        })
+        raw_pushes.append(
+            {
+                "tag": tag,
+                "userid": userid,
+                "content": raw_content,
+                "ipdatetime": ipdatetime,
+            }
+        )
 
     # 統計原始計數（不分合併）
     push_count = sum(1 for p in raw_pushes if p["tag"] == "推")
@@ -458,7 +509,7 @@ def _parse_pushes(main_content: BeautifulSoup) -> tuple[list[dict], int, int, in
     return merged, push_count, boo_count, neutral_count
 
 
-def _clean_article_content(main_content: BeautifulSoup) -> str:
+def _clean_article_content(main_content) -> str:
     """清除推文、meta、簽名檔，回傳純文字"""
     for el in main_content.select(".push"):
         el.decompose()
@@ -499,7 +550,7 @@ def _parse_components(content: str) -> dict[str, str]:
 
 def _infer_budget(content: str) -> tuple[int | None, str]:
     """從總價行推論預算與區間"""
-    total_match = re.search(r"總價[^0-9]*(\d+[,]?\d*)", content)
+    total_match = re.search(r"總價[^0-9]*(\d[\d,]*)", content)
     if not total_match:
         return None, "unknown"
     val = int(total_match.group(1).replace(",", ""))
@@ -512,18 +563,54 @@ def _infer_budget(content: str) -> tuple[int | None, str]:
 
 def _filter_within_months(entries: list[dict], months: int = 3) -> list[dict]:
     """過濾出在指定月份內的文章"""
-    import datetime
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=months * 30)
+    cutoff = datetime.now() - timedelta(days=months * 30)
 
     filtered: list[dict] = []
     for e in entries:
         date_str = _parse_article_date(e["url"], e["date"])
         try:
-            article_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            article_date = datetime.strptime(date_str, "%Y-%m-%d")
             if article_date >= cutoff:
                 filtered.append(e)
         except ValueError:
             filtered.append(e)  # keep if can't parse
+    return filtered
+
+
+def _filter_by_budget(
+    entries: list[dict],
+    user_budget_k: int | None,
+    tolerance: int = 15,
+) -> list[dict]:
+    """過濾文章，只保留預算在使用者指定 ±tolerance K 範圍內的文章
+
+    若文章標題無法判斷預算（無數字），則保留該文章（寧可多給參考，不要誤殺）。
+
+    Args:
+        entries: 文章列表
+        user_budget_k: 使用者預算（K 單位），如 50
+        tolerance: 容忍範圍（K 單位），預設 ±15K
+
+    Returns:
+        過濾後的文章列表
+    """
+    if user_budget_k is None:
+        return entries
+
+    filtered: list[dict] = []
+    min_budget = user_budget_k - tolerance  # e.g., 50-15 = 35
+    max_budget = user_budget_k + tolerance  # e.g., 50+15 = 65
+
+    for entry in entries:
+        title_k = _extract_title_budget_k(entry["title"])
+        if title_k is None:
+            # 無法判斷預算，保留
+            filtered.append(entry)
+        elif min_budget <= title_k <= max_budget:
+            # 在預算範圍內，保留
+            filtered.append(entry)
+        # 其餘排除
+
     return filtered
 
 
@@ -608,6 +695,10 @@ def pc_board_scraper(budget: str | None = None, use_case: str | None = None) -> 
                 e for e in raw_entries if _matches_use_case(e["title"], use_case)
             ]
 
+        # === 按預算過濾（若文章標題可推斷預算） ===
+        # 固定 ±15K 容忍度，不足 10 篇也不放寬
+        raw_entries = _filter_by_budget(raw_entries, budget_k, tolerance=15)
+
         if not raw_entries:
             return {
                 "status": "success",
@@ -662,26 +753,24 @@ def get_articles_storage_path() -> Path:
 
 def normalize_articles_payload(payload: Any) -> list[dict]:
     """將不同格式的文章回應轉成標準文章列表。"""
-
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
-
     if not isinstance(payload, dict):
         return []
 
-    if "articles" in payload:
-        return normalize_articles_payload(payload["articles"])
+    # Flatten nested "articles"/"Articles" wrappers
+    for key in ("articles", "Articles"):
+        if key in payload:
+            return normalize_articles_payload(payload[key])
 
-    if "Articles" in payload:
-        return normalize_articles_payload(payload["Articles"])
-
-    article_items: list[dict] = []
-    for key in sorted(payload.keys()):
-        value = payload[key]
-        if isinstance(value, dict) and value.get("id") and value.get("title"):
-            article_items.append(value)
-
-    return article_items
+    # Dict with article-like items (legacy format)
+    return [
+        payload[key]
+        for key in sorted(payload)
+        if isinstance(payload[key], dict)
+        and payload[key].get("id")
+        and payload[key].get("title")
+    ]
 
 
 def save_articles_to_disk(
