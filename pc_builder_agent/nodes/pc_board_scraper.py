@@ -8,6 +8,7 @@ PC_Board Scraper Node
 由 router 判斷是否進入查詢模式。
 """
 
+import re
 from typing import Any
 
 from pc_builder_agent.nodes.base import run_agent_turn
@@ -195,8 +196,6 @@ def _classify_budget(val: int) -> str:
 
 def _fallback_budget_classify(article: dict, categories: dict[str, list]) -> None:
     """舊資料相容：從內文 regex 解析價格並分類"""
-    import re
-
     content = article.get("content", "")
     title = article.get("title", "")
     combined = title + " " + content
@@ -370,7 +369,7 @@ def _analyze_articles(articles: list[dict]) -> str:
                 all_components[key].append(article_components[key])
 
     # --- 建構報表 ---
-    budget_hit = sum(1 for v in categories.values() if v)
+    budget_hit = sum(bool(v) for v in categories.values())
     lines = ["## 📋 文章分析報告\n"]
     lines.extend(_build_budget_lines(categories))
     lines.extend(_build_config_lines(articles))
@@ -393,11 +392,9 @@ def _prepare_articles_summary(articles: list[dict]) -> str:
         neutral_c = article.get("neutral_count", 0)
 
         # 計算好評率
-        total_sentiment = push_c + boo_c
         sentiment_str = ""
-        if total_sentiment > 0:
-            ratio = push_c / total_sentiment * 100
-            sentiment_str = f"（好評率 {ratio:.0f}%）"
+        if push_c + boo_c > 0:
+            sentiment_str = f"（好評率 {push_c / (push_c + boo_c) * 100:.0f}%）"
 
         summary_lines.append(
             f"{idx}. 【{title}】\n"
