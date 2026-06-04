@@ -2,7 +2,7 @@
 Integrator Node - 整合所有專家的建議成最終回應
 
 職責：
-- 整合 planner、router、PC_Board 查詢結果、CPU specialist、GPU specialist 的輸出
+- 整合 planner、router、PC_Board 查詢結果、五個 specialist 的輸出
 - 生成最終的建議摘要
 - 格式：繁體中文、簡潔但具體
 - 結構：總結、優先升級項目、下一步
@@ -27,7 +27,8 @@ def integrator_node(
     summary_messages = [
         SystemMessage(
             content=(
-                "You are the integrator agent. Combine outputs from planner, router, PC_Board query results, CPU specialist, and GPU specialist into a final recommendation.\n"
+                "You are the integrator agent. Combine outputs from planner, router, PC_Board query results, "
+                "and CPU/GPU/memory/storage/cooling specialists into a final recommendation.\n"
                 "The final output must be in Traditional Chinese (zh-TW), concise but specific, and structured as: Summary, Priority Upgrades, Next Steps."
             )
         ),
@@ -41,6 +42,9 @@ def integrator_node(
                 # f"PC_Board results: {state.get("pc_board_results", "")}\n\n"
                 f"CPU specialist: {state.get("cpu_advice", "")}\n\n"
                 f"GPU specialist: {state.get("gpu_advice", "")}\n\n"
+                f"Memory specialist: {state.get("memory_advice", "")}\n\n"
+                f"Storage specialist: {state.get("storage_advice", "")}\n\n"
+                f"Cooling specialist: {state.get("cooling_advice", "")}\n\n"
                 f"Known preferences: {format_profile_summary(state.get("profile_id", "default"))}"
             )
         ),
