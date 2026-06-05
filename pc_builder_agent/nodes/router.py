@@ -13,7 +13,14 @@ from typing import Any
 
 
 # 常數定義
-AVAILABLE_SPECIALISTS = ["cpu_specialist", "gpu_specialist", "pc_board_scraper"]
+AVAILABLE_SPECIALISTS = [
+    "cpu_specialist",
+    "gpu_specialist",
+    "memory_specialist",
+    "storage_specialist",
+    "cooling_specialist",
+    "pc_board_scraper",
+]
 DEFAULT_ROUTE_TARGETS = ["cpu_specialist", "gpu_specialist"]
 
 CPU_KEYWORDS = (
@@ -24,6 +31,18 @@ CPU_KEYWORDS = (
 GPU_KEYWORDS = (
     "gpu", "顯卡", "顯示卡", "遊戲", "1440p", "4k",
     "光追", "fps", "ai", "剪輯", "繪圖", "渲染",
+)
+
+MEMORY_KEYWORDS = (
+    "記憶體", "ram", "ddr", "xmp", "expo", "時序", "頻率",
+)
+
+STORAGE_KEYWORDS = (
+    "ssd", "hdd", "硬碟", "儲存", "nvme", "pcie", "tbw", "容量",
+)
+
+COOLING_KEYWORDS = (
+    "散熱", "風扇", "水冷", "塔散", "溫度", "噪音", "風道",
 )
 
 PC_BOARD_KEYWORDS = (
@@ -162,6 +181,20 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
 
     cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
     gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS)
+    memory_match = _contains_keyword(combined_text, MEMORY_KEYWORDS)
+    storage_match = _contains_keyword(combined_text, STORAGE_KEYWORDS)
+    cooling_match = _contains_keyword(combined_text, COOLING_KEYWORDS)
+
+    component_targets: list[str] = []
+    if memory_match:
+        component_targets.append("memory_specialist")
+    if storage_match:
+        component_targets.append("storage_specialist")
+    if cooling_match:
+        component_targets.append("cooling_specialist")
+
+    if component_targets:
+        return component_targets, "需求聚焦於特定零件，改由對應專家進行深入分析"
 
     if cpu_match and gpu_match:
         return ["cpu_specialist", "gpu_specialist"], "需求同時涵蓋平台與顯示需求，兩個專家都啟動"
@@ -198,10 +231,6 @@ def _route_targets_for_request(state: dict) -> tuple[list[str], str]:
     
     # 由router判斷是否為文章相關需求，這會影響是否優先查詢 scraper，但跟plan的need_pc_board_query不完全相同(目前先移除)
     # article_related = _is_article_related_request(state)
-
-    # if article_related and not pc_board_query_attempted:
-    #     return ["pc_board_scraper"], reason or summary or "文章相關需求，先查詢 PC_Board 內容"
-    
 
     # if need_pc_board_query and not pc_board_query_attempted:
     if need_pc_board_query and not pc_board_get_response:
