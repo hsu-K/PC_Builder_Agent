@@ -24,6 +24,9 @@ from pc_builder_agent.nodes import (
     router_node,
     cpu_specialist_node,
     gpu_specialist_node,
+    memory_specialist_node,
+    storage_specialist_node,
+    cooling_specialist_node,
     integrator_node,
     pc_board_scraper_node,
 )
@@ -50,6 +53,9 @@ class BuildState(TypedDict, total=False):
         route_reason (str): router 做出此選擇的原因
         cpu_advice (str): CPU specialist 的建議
         gpu_advice (str): GPU specialist 的建議
+        memory_advice (str): Memory specialist 的建議
+        storage_advice (str): Storage specialist 的建議
+        cooling_advice (str): Cooling specialist 的建議
         pc_board_response (str): PC_Board Scraper 的查詢回應
         final_answer (str): integrator 整合後的最終建議
     """
@@ -64,6 +70,9 @@ class BuildState(TypedDict, total=False):
     route_reason: str
     cpu_advice: str
     gpu_advice: str
+    memory_advice: str
+    storage_advice: str
+    cooling_advice: str
     pc_board_response: str
     final_answer: str
 
@@ -131,6 +140,9 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_node("router", lambda state: router_node(state, model_name=model_name, debug=debug))
     graph.add_node("cpu_specialist", lambda state: cpu_specialist_node(state, model_name=model_name, debug=debug))
     graph.add_node("gpu_specialist", lambda state: gpu_specialist_node(state, model_name=model_name, debug=debug))
+    graph.add_node("memory_specialist", lambda state: memory_specialist_node(state, model_name=model_name, debug=debug))
+    graph.add_node("storage_specialist", lambda state: storage_specialist_node(state, model_name=model_name, debug=debug))
+    graph.add_node("cooling_specialist", lambda state: cooling_specialist_node(state, model_name=model_name, debug=debug))
     graph.add_node("pc_board_scraper", lambda state: pc_board_scraper_node(state, model_name=model_name, mode="query", debug=debug))
     graph.add_node("integrator", lambda state: integrator_node(state, model_name=model_name, debug=debug))
 
@@ -141,6 +153,9 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_edge("pc_board_scraper", "router")
     graph.add_edge("cpu_specialist", "integrator")
     graph.add_edge("gpu_specialist", "integrator")
+    graph.add_edge("memory_specialist", "integrator")
+    graph.add_edge("storage_specialist", "integrator")
+    graph.add_edge("cooling_specialist", "integrator")
     graph.add_edge("integrator", END)
 
     # 編譯工作流程圖
