@@ -1,0 +1,39 @@
+{
+    "message": "包在我身上!",
+    "title": "標題",
+    "parts": {},
+    "budget": 50000,
+    "options": {
+        "cpu": [
+            { "name": "Intel Core i7-14700K", "price": 11500, "detail": "元件介紹 1", "sources":[{"title": "cpu 分析 1", "url": ""} ], "recommended": true},
+            { "name": "Intel Core i9-14900K", "price": 18900, "detail": "元件介紹 2", "sources":[{"title": "cpu 分析 2", "url": ""} ]},
+            { "name": "AMD Ryzen 9 ",    "price": 14800, "detail": "元件介紹 3", "sources":[{"title": "cpu 分析 3", "url": ""} ]}
+        ],
+        "gpu": [
+            { "name": "NVIDIA RTX 4070 Ti",     "price": 22900, "detail": "元件介紹", "sources":[{"title": "gpu 分析", "url": ""} ], "recommended": true},
+            { "name": "NVIDIA RTX 4070 Super",  "price": 18500, "detail": "元件介紹", "sources":[{"title": "gpu 分析", "url": ""} ]},
+            { "name": "AMD RX 7900 GRE",        "price": 16200, "detail": "元件介紹"}
+        ],
+        "mb": [
+            { "name": "ASUS ROG Strix Z790-F",         "price": 9800, "detail": "元件介紹", "sources":[{"title": "mb 分析", "url": ""} ], "recommended": true }
+        ],
+        "ram": [
+            { "name": "Corsair 32GB DDR5-6000",  "price": 4200, "detail": "元件介紹", "recommended": true},
+            { "name": "G.Skill 64GB DDR5-6400",  "price": 8800, "detail": "元件介紹"},
+            { "name": "Kingston 32GB DDR5-5600", "price": 3600, "detail": "元件介紹"}
+        ],
+        "ssd": [
+            { "name": "Samsung 990 Pro 2TB",      "price": 5200, "detail": "元件介紹", "recommended": true},
+            { "name": "WD Black SN850X 2TB",      "price": 4800, "detail": "元件介紹"}
+        ],
+        "psu": [
+            { "name": "Corsair RM850x 850W",              "price": 4800, "detail": "元件介紹", "recommended": true},
+            { "name": "be quiet! Straight Power 11 750W", "price": 4200, "detail": "元件介紹"}
+        ],
+        "case": [
+            { "name": "Lian Li PC-O11 Dynamic",    "price": 4000, "detail": "元件介紹", "recommended": true},
+            { "name": "Fractal Design Meshify 2",  "price": 4500, "detail": "元件介紹"}
+        ],
+        "cooler": [{ "name": "Noctua NH-D15",          "price": 3200 ,"detail": "元件介紹", "recommended": true}]
+    }
+}

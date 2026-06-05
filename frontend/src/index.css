@@ -1,0 +1,78 @@
+/* CSS 變數 */
+:root {
+  --color-background-primary: #ffffff;
+  --color-background-secondary: #f5f5f3;
+  --color-background-tertiary: #eeede8;
+  --color-background-info: #e6f1fb;
+  --color-background-success: #eaf3de;
+  --color-background-warning: #faeeda;
+  --color-background-danger: #fcebeb;
+
+  --color-text-primary: #1a1a18;
+  --color-text-secondary: #5f5e5a;
+  --color-text-tertiary: #888780;
+  --color-text-info: #0c447c;
+  --color-text-success: #27500a;
+  --color-text-warning: #633806;
+  --color-text-danger: #791f1f;
+
+  --color-border-tertiary: rgba(0, 0, 0, 0.12);
+  --color-border-secondary: rgba(0, 0, 0, 0.22);
+  --color-border-primary: rgba(0, 0, 0, 0.32);
+
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: ui-monospace, monospace;
+
+  --border-radius-md: 8px;
+  --border-radius-lg: 12px;
+  --border-radius-xl: 16px;
+}
+
+/* 暗黑模式 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background-primary: #1c1c1a;
+    --color-background-secondary: #242422;
+    --color-background-tertiary: #2c2c2a;
+    --color-background-danger: #2d1414;
+    --color-background-info: #0d1f35;
+    --color-background-success: #111f07;
+    --color-background-warning: #2a1a05;
+
+    --color-text-primary: #f0efe8;
+    --color-text-secondary: #a8a79f;
+    --color-text-tertiary: #6e6d68;
+    --color-text-danger: #f09595;
+    --color-text-info: #85b7eb;
+    --color-text-success: #97c459;
+    --color-text-warning: #ef9f27;
+
+    --color-border-tertiary: rgba(255, 255, 255, 0.10);
+    --color-border-secondary: rgba(255, 255, 255, 0.18);
+    --color-border-primary: rgba(255, 255, 255, 0.28);
+  }
+}
+
+/* Reset & 基礎樣式 */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  font-family: var(--font-sans);
+  background: var(--color-background-tertiary);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* App 最外層版面 */
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100%;
+  overflow: hidden;
+}

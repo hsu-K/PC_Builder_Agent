@@ -1,0 +1,316 @@
+.panel {
+  border-top: 0.5px solid var(--color-border-tertiary);
+  background: var(--color-background-primary);
+  display: flex;
+  flex-direction: column;
+  max-height: 420px;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 0;
+  flex-shrink: 0;
+}
+
+.headerTitle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--color-background-secondary);
+  border-radius: var(--border-radius-md);
+  padding: 2px;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--color-text-primary);
+}
+
+.tabActive {
+  background: var(--color-background-primary);
+  color: var(--color-text-primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+/* ── Custom body ── */
+.customBody {
+  overflow-y: auto;
+  padding: 10px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-secondary) transparent;
+}
+
+.customBody::-webkit-scrollbar { width: 3px; }
+.customBody::-webkit-scrollbar-thumb {
+  background: var(--color-border-secondary);
+  border-radius: 2px;
+}
+
+/* ── Field ── */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.fieldLabel {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.fieldNote {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--color-text-tertiary);
+}
+
+/* ── Chip group ── */
+.chipGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.chip {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  border-color: var(--color-border-secondary);
+  color: var(--color-text-primary);
+}
+
+.chipActive {
+  background: #EEEDFe;
+  border-color: #7F77DD;
+  color: #3C3489;
+}
+
+/* ── Budget row ── */
+.budgetRow {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.budgetInput {
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  color: var(--color-text-primary);
+  outline: none;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+
+.budgetInput:focus {
+  border-color: #7F77DD;
+}
+
+.budgetInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+/* ── Extra input ── */
+.extraInput {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  color: var(--color-text-primary);
+  resize: none;
+  outline: none;
+  line-height: 1.5;
+  transition: border-color 0.15s;
+}
+
+.extraInput:focus {
+  border-color: #7F77DD;
+}
+
+.extraInput::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+/* ── Preview ── */
+.previewWrap {
+  border-top: 0.5px solid var(--color-border-tertiary);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preview {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-md);
+  padding: 8px 10px;
+  white-space: pre-line;
+  line-height: 1.6;
+}
+
+.previewEmpty {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  padding: 6px 0;
+}
+
+.customActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.clearBtn {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  background: none;
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.clearBtn:hover {
+  background: var(--color-background-secondary);
+}
+
+.applyBtn {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-family: inherit;
+  color: white;
+  background: #534AB7;
+  border: none;
+  border-radius: var(--border-radius-md);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.applyBtn:hover:not(:disabled) {
+  background: #3C3489;
+}
+
+.applyBtn:disabled {
+  background: var(--color-border-secondary);
+  cursor: not-allowed;
+}
+
+/* ── Preset body ── */
+.presetBody {
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-secondary) transparent;
+}
+
+.presetBody::-webkit-scrollbar { width: 3px; }
+.presetBody::-webkit-scrollbar-thumb {
+  background: var(--color-border-secondary);
+  border-radius: 2px;
+}
+
+.group {
+  margin-bottom: 4px;
+}
+
+.groupLabel {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-tertiary);
+  padding: 6px 8px 3px;
+}
+
+.presetItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--border-radius-md);
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s;
+}
+
+.presetItem:hover {
+  background: var(--color-background-secondary);
+}
+
+.presetLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.presetText {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
