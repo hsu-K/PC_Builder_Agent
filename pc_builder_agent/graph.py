@@ -54,6 +54,18 @@ class BuildState(TypedDict, total=False):
         ecommerce_advice (str): Ecommerce Recommendation Specialist 的商品/優惠建議
         ecommerce_db_path (str): ecommerce 查詢使用的資料庫路徑(可選,主要供測試注入)
         final_answer (str): integrator 整合後的最終建議
+
+        互動式選件 state(state-driven,跨 thread 多輪保留):
+        selected_components (dict): {category: {product_name, price, source, socket, platform,
+            memory_generation, is_virtual}};已選零件的權威來源(非自然語言摘要)。
+        selected_budget (int|None): 互動式選件的預算。
+        selected_use_case (str|None): 互動式選件的用途(gaming/4k_gaming/office)。
+        current_target_category (str|None): 目前正在挑選的類別。
+        last_component_options (list): 上一輪推薦的候選清單(供「第 N 個」deterministic 解析)。
+        selection_flow_complete (bool): 是否已選完全部類別。
+        pending_reselect_category (str|None): 正在重新選擇的類別。
+        interactive_response (bool): 本輪是否由 deterministic 互動式引擎產生 final_answer
+            (為 True 時 integrator 直接沿用,不再經 LLM 改寫)。
     """
     profile_id: str
     preferences: dict
@@ -69,6 +81,15 @@ class BuildState(TypedDict, total=False):
     ecommerce_advice: str
     ecommerce_db_path: str
     final_answer: str
+    # 互動式選件 state(Phase Interactive-State-Driven-Fix)
+    selected_components: dict
+    selected_budget: int | None
+    selected_use_case: str | None
+    current_target_category: str | None
+    last_component_options: list
+    selection_flow_complete: bool
+    pending_reselect_category: str | None
+    interactive_response: bool
 
 
 # ============================================================================

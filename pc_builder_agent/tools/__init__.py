@@ -22,6 +22,10 @@ from pc_builder_agent.tools.ecommerce_tools import (
     recommend_pc_build_tool,
     search_ecommerce_promotions,
     find_bundle_discount_pc_pairs,
+    recommend_component_options_tool,
+    validate_selected_build_tool,
+    summarize_selected_build_tool,
+    save_selected_build_tool,
 )
 
 # 所有工具統一在這裡匯總，Node 只需要查這份表
@@ -35,6 +39,10 @@ ALL_TOOLS = [
     recommend_pc_build_tool,
     search_ecommerce_promotions,
     find_bundle_discount_pc_pairs,
+    recommend_component_options_tool,
+    validate_selected_build_tool,
+    summarize_selected_build_tool,
+    save_selected_build_tool,
 ]
 TOOL_LOOKUP = {tool.name: tool for tool in ALL_TOOLS}
 
@@ -53,4 +61,8 @@ __all__ = [
     "recommend_pc_build_tool",
     "search_ecommerce_promotions",
     "find_bundle_discount_pc_pairs",
+    "recommend_component_options_tool",
+    "validate_selected_build_tool",
+    "summarize_selected_build_tool",
+    "save_selected_build_tool",
 ]

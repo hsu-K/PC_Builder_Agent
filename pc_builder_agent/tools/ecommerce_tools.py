@@ -27,6 +27,10 @@ from pc_builder_agent.tools.ecommerce_db import (
     build_promotion_summary,
     estimate_promotion_adjusted_total,
     find_compatible_bundle_discount_pairs,
+    recommend_component_options,
+    validate_selected_build,
+    summarize_selected_build,
+    save_selected_build,
 )
 
 
@@ -400,10 +404,255 @@ def find_bundle_discount_pc_pairs(
     return results
 
 
+# 互動式候選推薦的 limit:預設 3,最多 5
+_OPTIONS_DEFAULT_LIMIT = 3
+_OPTIONS_MAX_LIMIT = 5
+
+
+def _clamp_options_limit(limit: int) -> int:
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return _OPTIONS_DEFAULT_LIMIT
+    if limit < 1:
+        return 1
+    if limit > _OPTIONS_MAX_LIMIT:
+        return _OPTIONS_MAX_LIMIT
+    return limit
+
+
+@tool
+def recommend_component_options_tool(
+    target_category: str,
+    budget: int | None = None,
+    use_case: str = "gaming",
+    remaining_budget: int | None = None,
+    prefer_platform: str | None = None,
+    selected_cpu: str | None = None,
+    selected_motherboard: str | None = None,
+    selected_ram: str | None = None,
+    selected_gpu: str | None = None,
+    selected_storage: str | None = None,
+    selected_psu: str | None = None,
+    selected_case: str | None = None,
+    selected_cooler: str | None = None,
+    selected_socket: str | None = None,
+    selected_memory_generation: str | None = None,
+    limit: int = 3,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict | str:
+    """互動式『單一零組件候選推薦』:依目前已選零件與平台,回該類別 2~3 個相容候選。
+
+    這是互動式逐步選件流程的核心工具。使用者「逐步選 / 先看某一類 / 換平台 / 指定 DDR4 主機板 /
+    我選第幾個」時,優先用本工具(而非一次給完整菜單的 recommend_pc_build_tool)。
+
+    相容性『不』由 LLM 判斷,全部由本工具 deterministic 處理:
+    - 已選 CPU/主機板 → 推導 socket / 記憶體世代 / 品牌約束,候選只在約束內。
+    - AM5 CPU 只會配 AM5 主機板(A620/B650/X670/X870),不會出現 A520/B550(AM4)。
+    - DDR4 主機板的 RAM 候選只會是 DDR4;DDR5 主機板只會是 DDR5;不推 DDR3。
+    - 已選 Intel/AMD 平台後,CPU 候選不會出現另一品牌。
+    - gaming Storage 候選優先 SSD/NVMe/M.2(排除純 HDD 作主碟);有獨顯時 PSU 至少 550W。
+    - 無內顯 CPU 且尚未選 GPU 時,warnings 會提醒需要獨立顯卡。
+
+    Args:
+        target_category: 必填,要推薦的類別(CPU / GPU / Motherboard / RAM / Storage /
+            PSU / Case / Cooler;也接受『處理器/主機板/記憶體/顯卡』等中文別名)。
+        budget: 總預算(新台幣整數,可選)。
+        use_case: 用途 gaming(預設) / 4k_gaming / office(文書)。
+        remaining_budget: 剩餘預算(可選,作為候選價格上限,避免明顯超預算)。
+        prefer_platform: 指定平台/品牌:AM5 / AM4 / LGA1700 / LGA1851 / AMD / Intel。
+        selected_cpu ~ selected_cooler: 使用者目前已選的各類商品名稱字串
+            (由 LLM 從對話歷史萃取;若使用者說「第 2 個」,請帶入上一輪該候選的商品名)。
+        selected_socket: 可選,直接指定 socket(AM5/AM4/LGA1700/LGA1851)。
+        selected_memory_generation: 可選,直接指定 DDR4 / DDR5。
+        limit: 回傳候選數,預設 3,最多 5。
+        db_path: 資料庫路徑,預設正式資料庫。
+
+    Returns:
+        dict:category / options / constraints_applied / warnings / next_step_suggestion。
+        每個 option 含 product_name / price / source / category / brand / model / socket /
+        platform / memory_generation / reason / compatibility_notes(不含 DB 內部欄位)。
+        資料庫不存在或無商品時,回清楚的中文 first-run / no-data 說明字串,不會編造商品。
+    """
+    _msg = _no_data_message(db_path)
+    if _msg:
+        return _msg
+    return recommend_component_options(
+        target_category=target_category,
+        budget=budget,
+        use_case=use_case,
+        remaining_budget=remaining_budget,
+        prefer_platform=prefer_platform,
+        selected_cpu=selected_cpu,
+        selected_motherboard=selected_motherboard,
+        selected_ram=selected_ram,
+        selected_gpu=selected_gpu,
+        selected_storage=selected_storage,
+        selected_psu=selected_psu,
+        selected_case=selected_case,
+        selected_cooler=selected_cooler,
+        selected_socket=selected_socket,
+        selected_memory_generation=selected_memory_generation,
+        limit=_clamp_options_limit(limit),
+        db_path=db_path,
+    )
+
+
+@tool
+def validate_selected_build_tool(
+    use_case: str = "gaming",
+    budget: int | None = None,
+    selected_cpu: str | None = None,
+    selected_motherboard: str | None = None,
+    selected_ram: str | None = None,
+    selected_gpu: str | None = None,
+    selected_storage: str | None = None,
+    selected_psu: str | None = None,
+    selected_case: str | None = None,
+    selected_cooler: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict | str:
+    """deterministic 檢查目前已選零件是否相容(互動式選件流程的相容性守門)。
+
+    檢查項目:CPU/主機板 socket 一致、主機板/RAM 記憶體世代相容、無 GPU 時 CPU 需有內顯、
+    gaming 有獨顯時 PSU ≥ 550W、gaming 主要儲存需為 SSD 類。socket/世代不一致會列為 issues
+    並使 is_valid=False;其餘為 warnings。
+
+    Args:
+        use_case: gaming(預設) / 4k_gaming / office。
+        budget: 預算(可選)。
+        selected_cpu ~ selected_cooler: 已選各類商品名稱字串。
+        db_path: 資料庫路徑。
+
+    Returns:
+        dict:is_valid / issues / warnings / selected_summary / missing_categories /
+        total_price / compatibility_summary。資料庫不存在或無商品時回 first-run/no-data 字串。
+    """
+    _msg = _no_data_message(db_path)
+    if _msg:
+        return _msg
+    return validate_selected_build(
+        use_case=use_case,
+        budget=budget,
+        selected_cpu=selected_cpu,
+        selected_motherboard=selected_motherboard,
+        selected_ram=selected_ram,
+        selected_gpu=selected_gpu,
+        selected_storage=selected_storage,
+        selected_psu=selected_psu,
+        selected_case=selected_case,
+        selected_cooler=selected_cooler,
+        db_path=db_path,
+    )
+
+
+@tool
+def summarize_selected_build_tool(
+    use_case: str = "gaming",
+    budget: int | None = None,
+    selected_cpu: str | None = None,
+    selected_motherboard: str | None = None,
+    selected_ram: str | None = None,
+    selected_gpu: str | None = None,
+    selected_storage: str | None = None,
+    selected_psu: str | None = None,
+    selected_case: str | None = None,
+    selected_cooler: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict | str:
+    """彙整目前已選零件:清單 / 總價 / 預算 / 剩餘預算 / 缺少類別 / 相容性 / 下一步建議。
+
+    用於互動式選件流程的 Step 8(顯示目前進度)。會內部呼叫相容性檢查,把不相容問題
+    一併放進 warnings。
+
+    Args:
+        use_case: gaming(預設) / 4k_gaming / office。
+        budget: 預算(可選;有提供才能算 remaining_budget)。
+        selected_cpu ~ selected_cooler: 已選各類商品名稱字串。
+        db_path: 資料庫路徑。
+
+    Returns:
+        dict:selected_summary / total_price / budget / remaining_budget / missing_categories /
+        compatibility_summary / next_recommended_category / warnings。
+        資料庫不存在或無商品時回 first-run/no-data 字串。
+    """
+    _msg = _no_data_message(db_path)
+    if _msg:
+        return _msg
+    return summarize_selected_build(
+        use_case=use_case,
+        budget=budget,
+        selected_cpu=selected_cpu,
+        selected_motherboard=selected_motherboard,
+        selected_ram=selected_ram,
+        selected_gpu=selected_gpu,
+        selected_storage=selected_storage,
+        selected_psu=selected_psu,
+        selected_case=selected_case,
+        selected_cooler=selected_cooler,
+        db_path=db_path,
+    )
+
+
+@tool
+def save_selected_build_tool(
+    budget: int | None = None,
+    use_case: str = "gaming",
+    selected_cpu: str | None = None,
+    selected_motherboard: str | None = None,
+    selected_ram: str | None = None,
+    selected_gpu: str | None = None,
+    selected_storage: str | None = None,
+    selected_psu: str | None = None,
+    selected_case: str | None = None,
+    selected_cooler: str | None = None,
+    output_dir: str = "outputs/builds",
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict | str:
+    """把使用者確認的最終菜單保存成 JSON 檔(只在使用者**明確確認**後才呼叫)。
+
+    觸發時機:使用者說「確認此菜單 / 確認 / 就這套 / 保存 / 存成 JSON」等。**不要每輪自動保存**。
+    會把目前所有已選 selected_*(含『無』虛擬選項,如 GPU=無內顯 / Cooler=無)寫成一份 JSON,
+    存到 output_dir(預設 outputs/builds/),檔名 pc_build_YYYYMMDD_HHMMSS.json,**不覆蓋舊檔、不寫 data/**。
+
+    Args:
+        budget: 預算(可選)。
+        use_case: gaming(預設) / 4k_gaming / office。
+        selected_cpu ~ selected_cooler: 目前已選各類商品名稱字串(『無』選項可填「無」)。
+        output_dir: 輸出資料夾,預設 outputs/builds。
+        db_path: 資料庫路徑(唯讀,用於取價/規格)。
+
+    Returns:
+        dict:ok / output_path / total_price / component_count / warnings。
+        回答使用者時請說明「已保存最終菜單」與 JSON 路徑(output_path)。
+        資料庫不存在或無商品時回 first-run / no-data 字串。
+    """
+    from datetime import datetime
+    _msg = _no_data_message(db_path)
+    if _msg:
+        return _msg
+    selected_map = {}
+    for name, cat in [(selected_cpu, "CPU"), (selected_motherboard, "Motherboard"),
+                      (selected_ram, "RAM"), (selected_gpu, "GPU"), (selected_storage, "Storage"),
+                      (selected_psu, "PSU"), (selected_case, "Case"), (selected_cooler, "Cooler")]:
+        if name and str(name).strip():
+            selected_map[cat] = str(name).strip()
+    if not selected_map:
+        return "目前沒有任何已選零件可保存。請先選好零件再確認保存。"
+    created_at = datetime.now().isoformat(timespec="seconds")
+    return save_selected_build(
+        selected_map, budget=budget, use_case=use_case,
+        created_at=created_at, output_dir=output_dir, db_path=db_path)
+
+
 __all__ = [
     "search_ecommerce_products",
     "find_ecommerce_deals_tool",
     "recommend_pc_build_tool",
     "search_ecommerce_promotions",
     "find_bundle_discount_pc_pairs",
+    "recommend_component_options_tool",
+    "validate_selected_build_tool",
+    "summarize_selected_build_tool",
+    "save_selected_build_tool",
 ]

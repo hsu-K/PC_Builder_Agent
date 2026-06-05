@@ -32,9 +32,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from pc_builder_agent.tools import platform_rules as _pr
 
 
 DEFAULT_DB_PATH = "data/ecommerce.db"
@@ -1898,3 +1901,2528 @@ def load_seed_products(db_path: str = DEFAULT_DB_PATH) -> dict[str, int]:
 
     init_db(db_path)
     return upsert_products(DEFAULT_SEED_PRODUCTS, db_path=db_path)
+
+
+# ============================================================================
+# 互動式零組件候選推薦(deterministic;Phase Simplify-B)
+# ============================================================================
+# 設計:依「目前已選零件 + 指定平台」推導出 deterministic 的相容性約束
+# (socket / memory_generation / brand),只在約束內挑出 2~3 個多樣化候選。
+# 相容性「不」交給 LLM 判斷,全部由下列規則與 specs 決定。
+
+# 互動式選件支援的標準類別(canonical),以及常見別名 -> canonical 對照。
+_COMPONENT_CATEGORIES = ("CPU", "GPU", "Motherboard", "RAM", "Storage", "PSU", "Case", "Cooler")
+_CATEGORY_ALIASES = {
+    "cpu": "CPU", "處理器": "CPU",
+    "gpu": "GPU", "顯卡": "GPU", "顯示卡": "GPU",
+    "motherboard": "Motherboard", "mb": "Motherboard", "主機板": "Motherboard", "mainboard": "Motherboard",
+    "ram": "RAM", "記憶體": "RAM", "memory": "RAM",
+    "storage": "Storage", "ssd": "Storage", "硬碟": "Storage", "儲存": "Storage", "nvme": "Storage",
+    "psu": "PSU", "電源": "PSU", "電源供應器": "PSU", "power": "PSU",
+    "case": "Case", "機殼": "Case", "chassis": "Case",
+    "cooler": "Cooler", "散熱器": "Cooler", "散熱": "Cooler", "cpu cooler": "Cooler",
+}
+# 互動流程的『固定』選件順序(deterministic):
+# CPU → 顯示卡 → 主機板 → 記憶體 → 硬碟 → 電源 → 散熱器 → 機殼。
+COMPONENT_SELECTION_ORDER = ("CPU", "GPU", "Motherboard", "RAM", "Storage", "PSU", "Cooler", "Case")
+# 向後相容別名(舊程式碼引用);內容已對齊新順序。
+_SELECTION_ORDER = COMPONENT_SELECTION_ORDER
+# 各類別中文標籤(給 next_step_suggestion 用)
+_CATEGORY_LABEL_ZH = {
+    "CPU": "CPU(處理器)", "Motherboard": "主機板", "RAM": "記憶體", "GPU": "顯示卡",
+    "Storage": "儲存裝置", "PSU": "電源供應器", "Case": "機殼", "Cooler": "散熱器",
+}
+
+# ---- 虛擬「無」選項(GPU 用內顯 / Cooler 不額外購買)----
+_VIRTUAL_NONE_NAME = {
+    "GPU": "無獨立顯示卡（使用 CPU 內顯）",
+    "Cooler": "無額外散熱器",
+}
+_VIRTUAL_SOURCE = "virtual_option"
+
+
+def _is_none_selection(name: str | None, category: str | None) -> bool:
+    """判斷 selected_* 是否為『無』虛擬選項(GPU 用內顯 / Cooler 不另購)。"""
+    if not name:
+        return False
+    n = str(name).strip().lower()
+    if category == "GPU":
+        if n in ("無", "none", "no gpu", "內顯", "用內顯", "使用內顯"):
+            return True
+        return ("無" in name) and any(k in name for k in ("內顯", "獨立顯", "獨顯", "顯示卡"))
+    if category == "Cooler":
+        if n in ("無", "none", "no cooler"):
+            return True
+        return ("無" in name) and any(k in name for k in ("散熱", "cooler"))
+    return False
+
+
+def _virtual_none_spec(category: str) -> dict:
+    """回傳『無』虛擬選項的標準化規格(price=0、is_virtual=True)。"""
+    return {
+        "found": True, "product_name": _VIRTUAL_NONE_NAME.get(category, "無"),
+        "price": 0, "source": _VIRTUAL_SOURCE, "socket": None, "platform": None,
+        "memory_generation": None, "has_igpu": None, "brand": None,
+        "query_name": None, "match_level": "virtual", "ambiguous": False,
+        "is_virtual": True,
+    }
+
+
+def _cpu_needs_cooler_attention(cpu_name: str | None) -> bool:
+    """高功耗 / K / X3D / 高階 CPU,或無法確認盒裝散熱器時,選 Cooler=無 需提醒。
+
+    保守:只要無法確認是低功耗附原廠散熱器,就回 True(寧可提醒)。
+    明確低功耗線索(AMD 盒裝 G/GT、Intel 非 K 含內顯)較可能附原廠,回 False。
+    """
+    if not cpu_name:
+        return True
+    t = cpu_name.upper()
+    if re.search(r"X3D|\bK\b|KF|KS|\bI[79]-|RYZEN\s*9|\bR9\b|CORE ULTRA\s*[79]|ULTRA\s*[79]", t):
+        return True
+    # AMD G/GT 盒裝、Intel 非 K 帶內顯通常附原廠散熱器
+    if re.search(r"\d{3,4}\s?G[T]?\b", t) or ("盒" in (cpu_name or "")):
+        return False
+    return True
+
+
+def get_next_component_category(selected_components: dict | None, use_case: str | None = None) -> str | None:
+    """依固定順序回傳『下一個要選』的類別;全部選完回 None。
+
+    selected_components:{canonical_category: name} 的 dict(name 非空即視為已選,
+    含『無』虛擬選項)。順序固定為 COMPONENT_SELECTION_ORDER。
+    """
+    sel = selected_components or {}
+    chosen = {k for k, v in sel.items() if v}
+    for cat in COMPONENT_SELECTION_ORDER:
+        if cat not in chosen:
+            return cat
+    return None
+
+
+def _canonical_category(value: str | None) -> str | None:
+    """把使用者/LLM 傳入的類別字串正規化成 canonical 類別名;無法對應回 None。"""
+    if not value:
+        return None
+    v = value.strip()
+    if v in _COMPONENT_CATEGORIES:
+        return v
+    return _CATEGORY_ALIASES.get(v.lower())
+
+
+def _norm_full(s: str | None) -> str:
+    """把商品名正規化成『可寬鬆比對』的字串。
+
+    處理 LLM 常見的改寫差異:全形/半形、空白、標點、以及 ↑/最高(都代表最大時脈)等。
+    規則:NFKC 正規化 -> 小寫 -> 去掉 ↑ 與『最高』-> 只保留英數與 CJK(其餘空白標點全移除)。
+    例:'AMD R5 8500G盒…3.5G(↑5.0G)65W' 與 '…3.5G(最高5.0G) 65W' 會正規化成可互相包含的字串。
+    """
+    if not s:
+        return ""
+    t = unicodedata.normalize("NFKC", str(s)).lower()
+    t = t.replace("↑", "").replace("最高", "")
+    return re.sub(r"[^0-9a-z一-鿿]+", "", t)
+
+
+# CPU / RAM / 主機板的「識別 token」抽取規則(用於 brand+model 比對階段)
+_CPU_MODEL_RES = (
+    re.compile(r"\bR[3579]\s?\d{3,4}[A-Z0-9]*", re.IGNORECASE),       # R5 7500F / R7 9800X3D
+    re.compile(r"\bRYZEN\s?\d\s?\d{3,4}[A-Z0-9]*", re.IGNORECASE),    # Ryzen 5 7500F
+    re.compile(r"\bI[3579][-\s]?\d{4,5}[A-Z]*", re.IGNORECASE),       # i5-12400F
+    re.compile(r"\bULTRA\s?\d\s?\d{3}[A-Z]*", re.IGNORECASE),         # Core Ultra 5 225F
+)
+_BRAND_ALIASES = {
+    "華碩": "ASUS", "ASUS": "ASUS", "技嘉": "GIGABYTE", "GIGABYTE": "GIGABYTE",
+    "微星": "MSI", "MSI": "MSI", "華擎": "ASROCK", "ASROCK": "ASROCK",
+    "AMD": "AMD", "INTEL": "INTEL", "RYZEN": "AMD",
+}
+
+
+def _key_tokens(s: str | None, category: str | None) -> set[str]:
+    """抽出商品的『識別 token』集合(大寫、去空白),用於 brand+model token 比對。
+
+    - CPU:Ryzen/R# 型號、iX-NNNN、Core Ultra 型號。
+    - Motherboard:晶片組(B650/H610/...)。
+    - RAM:DDR4/DDR5、容量(16GB)、頻率(6000)。
+    - 各類:可辨識的品牌(華碩/技嘉/微星/華擎/AMD/Intel)。
+    """
+    tokens: set[str] = set()
+    if not s:
+        return tokens
+    up = unicodedata.normalize("NFKC", str(s)).upper()
+
+    # 品牌
+    for alias, canon in _BRAND_ALIASES.items():
+        if alias in up:
+            tokens.add("BRAND:" + canon)
+
+    if category == "CPU" or category is None:
+        for rx in _CPU_MODEL_RES:
+            for m in rx.findall(up):
+                tokens.add("MODEL:" + re.sub(r"[\s-]+", "", m))
+    if category == "Motherboard" or category is None:
+        for m in _pr._MB_CHIPSET_RE.findall(up):
+            base = m.upper().rstrip("E")[:4]
+            tokens.add("CHIP:" + base)
+    # 記憶體世代:主機板與 RAM 都需要(主機板名常含 DDR4/DDR5 或縮寫 D4/D5)
+    if category in ("Motherboard", "RAM") or category is None:
+        for g in re.findall(r"DDR[345]", up):
+            tokens.add("MEM:" + g)
+        if re.search(r"\bD5\b", up):
+            tokens.add("MEM:DDR5")
+        if re.search(r"\bD4\b", up):
+            tokens.add("MEM:DDR4")
+    if category == "RAM" or category is None:
+        for cap in re.findall(r"(\d{1,3})\s*GB", up):
+            tokens.add("CAP:" + cap + "GB")
+        for sp in re.findall(r"DDR[345][-\s]?(\d{4,5})", up):
+            tokens.add("SPD:" + sp)
+    return tokens
+
+
+# 各比對階段的分數(越高越精確)
+_MATCH_EXACT = 100
+_MATCH_NORM_EQUAL = 90
+_MATCH_NORM_SUBSTR = 70
+_MATCH_MODEL_KEY = 60
+_MATCH_BRAND_MODEL = 40
+# 只有 exact / normalized-equal 視為「精確比對」,其餘為 fuzzy(會在工具層提示)
+_FUZZY_LEVELS = {"normalized-substr", "model_key", "brand_model"}
+
+
+def _score_candidate(qn: str, qfull: str, qkey: str, qtokens: set[str],
+                     p: dict, category: str | None) -> tuple[int, str | None]:
+    """對單一候選商品打分,回 (score, match_level);不相符回 (0, None)。"""
+    pname = p.get("product_name") or ""
+    if pname.strip() == qn.strip():
+        return _MATCH_EXACT, "exact"
+    pfull = _norm_full(pname)
+    if qfull and pfull and qfull == pfull:
+        return _MATCH_NORM_EQUAL, "normalized"
+    if qfull and pfull and (qfull in pfull or pfull in qfull):
+        # 包含關係:較長者需明顯包含較短者(避免極短字串亂中)
+        if len(qfull) >= 4:
+            return _MATCH_NORM_SUBSTR, "normalized-substr"
+    pkey = _normalize_model_key(p.get("model") or "") or _normalize_model_key(pname)
+    # 需共享至少 5 字元前綴,避免極短型號鍵(如 'h610')亂中,忽略 DDR4/DDR5 等差異
+    if qkey and pkey and (pkey.startswith(qkey) or qkey.startswith(pkey)) and min(len(qkey), len(pkey)) >= 5:
+        return _MATCH_MODEL_KEY, "model_key"
+    # brand + model token:要求 query 的識別 token 全部出現在候選(避免 DDR4 配到 DDR5)
+    if qtokens:
+        ptokens = _key_tokens(pname, category)
+        # 只比對「識別性」token(MODEL/CHIP/MEM/CAP),品牌作加分但非必要
+        q_ident = {t for t in qtokens if not t.startswith("BRAND:")}
+        if q_ident and q_ident.issubset(ptokens):
+            bonus = 1 if (any(t.startswith("BRAND:") for t in qtokens)
+                          and qtokens & ptokens) else 0
+            return _MATCH_BRAND_MODEL + len(q_ident) + bonus, "brand_model"
+    return 0, None
+
+
+def _match_selected_product(name: str | None, category: str | None, db_path: str) -> dict:
+    """多階段把『使用者已選商品名(可能被 LLM 改寫)』對回 DB 商品。
+
+    階段(由精確到寬鬆):exact -> normalized-equal -> normalized-substr ->
+    model_key 前綴 -> brand+model token。限定 category 以避免跨類別誤配。
+
+    Returns dict:row(對到的商品或 None)/ match_level / ambiguous /
+    candidate_count(同分候選數)。唯讀,不寫 DB。
+    """
+    out = {"row": None, "match_level": "none", "ambiguous": False, "candidate_count": 0}
+    if not name or not str(name).strip():
+        return out
+    qn = str(name).strip()
+    qfull = _norm_full(qn)
+    qkey = _normalize_model_key(qn)
+    qtokens = _key_tokens(qn, category)
+
+    pool = query_products(category=category, limit=5000, db_path=db_path)
+    if not pool:
+        return out
+
+    # 硬性約束:若 query 明確帶記憶體世代(DDR4/DDR5)或晶片組(B650/H610…),
+    # 候選必須含相同 token,否則先剔除——確保『H610 DDR4』不會誤配到 DDR5 板。
+    hard = {t for t in qtokens if t.startswith("MEM:") or t.startswith("CHIP:")}
+    if hard:
+        filtered = [p for p in pool if hard.issubset(_key_tokens(p.get("product_name"), category))]
+        if filtered:
+            pool = filtered
+
+    best_score = 0
+    best_level: str | None = None
+    tied: list[dict] = []
+    for p in pool:
+        score, level = _score_candidate(qn, qfull, qkey, qtokens, p, category)
+        if score <= 0:
+            continue
+        if score > best_score:
+            best_score, best_level, tied = score, level, [p]
+        elif score == best_score:
+            tied.append(p)
+
+    if best_score <= 0 or not tied:
+        return out
+
+    # 同分多筆:取最便宜者(price 為 None 排後),並標記 ambiguous(僅 fuzzy 階段才視為需提醒)
+    distinct = {(p.get("product_name"), p.get("price")) for p in tied}
+    tied_sorted = sorted(tied, key=lambda r: (r.get("price") is None, r.get("price") or 0))
+    chosen = tied_sorted[0]
+    ambiguous = (len(distinct) > 1) and (best_level in _FUZZY_LEVELS)
+    return {
+        "row": chosen,
+        "match_level": best_level or "none",
+        "ambiguous": ambiguous,
+        "candidate_count": len(distinct),
+    }
+
+
+def _find_product_by_name(name: str | None, category: str | None, db_path: str) -> dict | None:
+    """以名稱/型號把使用者已選商品對回 DB 的一筆商品;找不到回 None。
+
+    內部走多階段比對(_match_selected_product),容忍 LLM 對商品名的常見改寫
+    (↑/最高、空白、標點、全半形、只給品牌+型號或部分型號)。限定 category 不跨類別誤配。
+    唯讀,不寫 DB。
+    """
+    return _match_selected_product(name, category, db_path)["row"]
+
+
+def _get_selected_product_specs(name: str | None, category: str, db_path: str) -> dict:
+    """解析「已選商品」的平台規格。
+
+    優先用 DB 內該商品的 specs;DB 找不到時退而用 platform_rules 由名稱字串推斷
+    (這樣即使使用者打的型號 DB 沒有,仍能套用相容性規則,而非完全失效)。
+
+    Returns dict:found / product_name / price / socket / platform /
+    memory_generation / has_igpu(僅 CPU) / brand。
+    """
+    # 『無』虛擬選項(GPU 用內顯 / Cooler 不另購):不查 DB,直接回 price=0 的虛擬規格。
+    if _is_none_selection(name, category):
+        return _virtual_none_spec(category)
+
+    out: dict[str, Any] = {
+        "found": False, "product_name": name, "price": None,
+        "source": None,
+        "socket": None, "platform": None, "memory_generation": None,
+        "has_igpu": None, "brand": None,
+        "query_name": name, "match_level": "none", "ambiguous": False,
+        "is_virtual": False,
+    }
+    match = _match_selected_product(name, category, db_path)
+    row = match["row"]
+    out["match_level"] = match["match_level"]
+    out["ambiguous"] = match["ambiguous"]
+    if row:
+        sp = _specs_of(row)
+        out["found"] = True
+        out["product_name"] = row.get("product_name")
+        out["price"] = row.get("price")
+        out["source"] = row.get("source")
+        out["socket"] = sp.get("socket")
+        out["platform"] = sp.get("platform")
+        out["memory_generation"] = (
+            _effective_mb_mem(row) if category == "Motherboard" else sp.get("memory_generation")
+        )
+        out["brand"] = row.get("brand") or _pr.cpu_brand_from_text(row.get("product_name"))
+        if category == "CPU":
+            out["has_igpu"] = _cpu_has_igpu(row)
+        # specs 缺 socket 時,用名稱推斷補上(不覆蓋既有值)
+        if not out["socket"]:
+            nm = row.get("product_name")
+            if category == "CPU":
+                s, p, m = _pr.cpu_platform_from_text(nm)
+            elif category == "Motherboard":
+                s, p, m = _pr.mb_platform_from_text(nm)
+            else:
+                s = p = m = None
+            out["socket"] = out["socket"] or s
+            out["platform"] = out["platform"] or p
+            out["memory_generation"] = out["memory_generation"] or m
+        return out
+
+    # DB 找不到:純由名稱字串推斷
+    if category == "CPU":
+        s, p, m = _pr.cpu_platform_from_text(name)
+        out["has_igpu"] = _cpu_has_igpu({"product_name": name or ""})
+        out["brand"] = _pr.cpu_brand_from_text(name)
+    elif category == "Motherboard":
+        s, p, m = _pr.mb_platform_from_text(name)
+    else:
+        s = p = m = None
+        if category == "RAM":
+            m = _pr.mem_from_text(name)
+    out["socket"], out["platform"], out["memory_generation"] = s, p, m
+    return out
+
+
+def _collect_selected(selected_kwargs: dict[str, str | None]) -> dict[str, str]:
+    """把 selected_cpu / selected_motherboard ... 收斂成 {canonical_category: name}。"""
+    mapping = {
+        "selected_cpu": "CPU", "selected_motherboard": "Motherboard", "selected_ram": "RAM",
+        "selected_gpu": "GPU", "selected_storage": "Storage", "selected_psu": "PSU",
+        "selected_case": "Case", "selected_cooler": "Cooler",
+    }
+    out: dict[str, str] = {}
+    for key, cat in mapping.items():
+        val = selected_kwargs.get(key)
+        if val and str(val).strip():
+            out[cat] = str(val).strip()
+    return out
+
+
+def _resolve_platform_constraints(
+    selected_map: dict[str, str],
+    prefer_platform: str | None,
+    selected_socket: str | None,
+    selected_memory_generation: str | None,
+    db_path: str,
+) -> dict[str, Any]:
+    """由已選零件 + 指定平台推導 deterministic 約束。
+
+    優先序:已選主機板(socket+mem 最權威)> 已選 CPU(socket/品牌)> 已選 RAM(mem)
+    > prefer_platform > selected_socket / selected_memory_generation。
+    最後由 socket 補出 brand 與預設 mem(LGA1700 的 mem 留待主機板版本決定)。
+
+    Returns dict:socket / memory_generation / brand / notes(list) /
+    cpu_specs(已選 CPU 的規格,供內顯判斷) / mem_ambiguous(bool)。
+    """
+    socket: str | None = None
+    mem: str | None = None
+    brand: str | None = None
+    notes: list[str] = []
+    cpu_specs: dict | None = None
+
+    # 1) 主機板:socket 與記憶體世代最權威
+    if "Motherboard" in selected_map:
+        sp = _get_selected_product_specs(selected_map["Motherboard"], "Motherboard", db_path)
+        if sp["socket"]:
+            socket = sp["socket"]
+            notes.append(f"已選主機板 → socket={socket}")
+        if sp["memory_generation"] in ("DDR4", "DDR5"):
+            mem = sp["memory_generation"]
+            notes.append(f"已選主機板 → memory_generation={mem}")
+        elif sp["memory_generation"] == "DDR4_or_DDR5":
+            notes.append("已選主機板同時支援 DDR4/DDR5,記憶體世代待確認")
+
+    # 2) CPU:socket(若主機板未給)、品牌
+    if "CPU" in selected_map:
+        sp = _get_selected_product_specs(selected_map["CPU"], "CPU", db_path)
+        cpu_specs = sp
+        if not socket and sp["socket"]:
+            socket = sp["socket"]
+            notes.append(f"已選 CPU → socket={socket}")
+        if not mem and sp["memory_generation"] in ("DDR4", "DDR5"):
+            mem = sp["memory_generation"]
+            notes.append(f"已選 CPU → memory_generation={mem}")
+        if sp["brand"]:
+            brand = brand or sp["brand"]
+
+    # 3) RAM:補記憶體世代
+    if "RAM" in selected_map and not mem:
+        sp = _get_selected_product_specs(selected_map["RAM"], "RAM", db_path)
+        if sp["memory_generation"] in ("DDR4", "DDR5"):
+            mem = sp["memory_generation"]
+            notes.append(f"已選記憶體 → memory_generation={mem}")
+
+    # 4) prefer_platform(AM5/AM4/LGA1700/LGA1851 或 AMD/Intel)
+    norm = _pr.normalize_platform(prefer_platform)
+    if norm in ("AM4", "AM5", "LGA1700", "LGA1851"):
+        if not socket:
+            socket = norm
+            notes.append(f"指定平台 → socket={norm}")
+    elif norm in ("AMD", "Intel"):
+        if not brand:
+            brand = norm
+            notes.append(f"指定平台 → 品牌={norm}")
+
+    # 5) 顯式 selected_socket / selected_memory_generation(僅在尚未決定時採用)
+    if not socket and selected_socket:
+        s = _pr.normalize_platform(selected_socket)
+        if s in ("AM4", "AM5", "LGA1700", "LGA1851"):
+            socket = s
+            notes.append(f"指定 socket={s}")
+    if not mem and selected_memory_generation:
+        m = str(selected_memory_generation).strip().upper()
+        if m in ("DDR4", "DDR5"):
+            mem = m
+            notes.append(f"指定 memory_generation={m}")
+
+    # 6) 由 socket 補出 brand 與預設 mem(LGA1700 的 mem 不臆測)
+    if socket and not brand:
+        brand = _pr.SOCKET_BRAND.get(socket)
+    mem_ambiguous = False
+    if socket and not mem:
+        default_mem = _pr.SOCKET_DEFAULT_MEM.get(socket)
+        if default_mem:
+            mem = default_mem
+        elif socket == "LGA1700":
+            mem_ambiguous = True  # DDR4/DDR5 取決於主機板版本
+
+    return {
+        "socket": socket,
+        "memory_generation": mem,
+        "brand": brand,
+        "notes": notes,
+        "cpu_specs": cpu_specs,
+        "mem_ambiguous": mem_ambiguous,
+    }
+
+
+def _candidate_platform_fields(row: dict, category: str) -> dict[str, Any]:
+    """取出某候選商品的平台欄位(socket / platform / memory_generation / brand)。"""
+    sp = _specs_of(row)
+    socket = sp.get("socket")
+    platform = sp.get("platform")
+    if category == "Motherboard":
+        mem = _effective_mb_mem(row)
+    else:
+        mem = sp.get("memory_generation")
+    brand = row.get("brand") or _pr.cpu_brand_from_text(row.get("product_name"))
+    # specs 缺 socket 時用名稱推斷補上(僅 CPU / Motherboard)
+    if not socket:
+        if category == "CPU":
+            s, p, m = _pr.cpu_platform_from_text(row.get("product_name"))
+        elif category == "Motherboard":
+            s, p, m = _pr.mb_platform_from_text(row.get("product_name"))
+        else:
+            s = p = m = None
+        socket = socket or s
+        platform = platform or p
+        mem = mem or m
+    return {"socket": socket, "platform": platform, "memory_generation": mem, "brand": brand}
+
+
+def _filter_candidates(
+    pool: list[dict],
+    target_category: str,
+    constraints: dict[str, Any],
+    gaming: bool,
+    has_dgpu_expected: bool,
+) -> tuple[list[dict], list[str], list[str]]:
+    """依 deterministic 規則過濾候選池。
+
+    Returns (kept_rows, constraints_applied, warnings)。kept_rows 內每筆會附 _pf 平台欄位。
+    平台關鍵類別(CPU/Motherboard/RAM)若過濾後為空,**不**回退(正確性優先);
+    PSU/Storage 等若過濾後為空則回退原池並加註說明。
+    """
+    socket = constraints.get("socket")
+    mem = constraints.get("memory_generation")
+    brand = constraints.get("brand")
+    applied: list[str] = []
+    warnings: list[str] = []
+
+    kept: list[dict] = []
+    for row in pool:
+        pf = _candidate_platform_fields(row, target_category)
+        row = {**row, "_pf": pf}
+
+        if target_category == "CPU":
+            if not pf["socket"]:
+                continue  # 無法判定平台的 CPU 不列(避免誤導)
+            if socket and pf["socket"] != socket:
+                continue
+            if brand and pf["brand"] and pf["brand"] != brand:
+                continue
+            kept.append(row)
+
+        elif target_category == "Motherboard":
+            if not pf["socket"]:
+                continue
+            if socket and pf["socket"] != socket:
+                continue
+            if mem in ("DDR4", "DDR5"):
+                # 主機板需能支援該世代(DDR4_or_DDR5 視為可相容)
+                if not _mem_compatible(mem, pf["memory_generation"]):
+                    continue
+            kept.append(row)
+
+        elif target_category == "RAM":
+            rmem = pf["memory_generation"]
+            if rmem == "DDR3":
+                continue  # 現代菜單不推 DDR3
+            if mem in ("DDR4", "DDR5"):
+                if rmem != mem:
+                    continue
+            else:
+                # 無明確世代約束:只保留 DDR4/DDR5
+                if rmem not in ("DDR4", "DDR5"):
+                    continue
+            kept.append(row)
+
+        elif target_category == "Storage":
+            if gaming and not _is_ssd_storage(row):
+                continue  # 遊戲/4K 主要儲存只接受 SSD 類
+            kept.append(row)
+
+        elif target_category == "PSU":
+            if has_dgpu_expected:
+                w = _specs_of(row).get("wattage")
+                if w is None or w < 550:
+                    continue
+            kept.append(row)
+
+        else:  # GPU / Case / Cooler:無硬性平台過濾
+            kept.append(row)
+
+    # RAM(gaming/4k):優先 >=16GB(沿用完整菜單引擎的選品門檻);足夠時才收斂
+    if target_category == "RAM" and gaming and kept:
+        big = [r for r in kept if (_ram_gb(_specs_of(r).get("capacity")) or 0) >= 16]
+        if len(big) >= 2:
+            kept = big
+            applied.append("capacity>=16GB")
+
+    # CPU(office / 文書機):優先『有內顯』的 CPU(deterministic 用 _cpu_has_igpu 判斷),
+    # 讓下一輪 GPU 能合理提供『無獨立顯示卡(使用 CPU 內顯)』。gaming/4k 不套用此偏好。
+    if target_category == "CPU" and (not gaming) and kept:
+        igpu = [r for r in kept if _cpu_has_igpu(r)]
+        if len(igpu) >= 2:
+            kept = igpu  # DB 有足夠內顯 CPU → 候選全部有內顯
+            applied.append("office=內顯優先")
+        elif igpu:
+            # 內顯 CPU 不足 2 個:把有內顯的排前面,仍補無內顯款,但提醒
+            kept = igpu + [r for r in kept if r not in igpu]
+            warnings.append(
+                "資料庫中內顯 CPU 數量有限;部分候選可能無內顯,文書機若選無內顯款仍需搭配獨立顯卡。")
+        else:
+            warnings.append(
+                "資料庫中目前找不到內顯 CPU;以下候選可能無內顯,文書機若選無內顯款仍需搭配獨立顯卡。")
+
+    # constraints_applied 記錄
+    if target_category in ("CPU", "Motherboard") and socket:
+        applied.append(f"socket={socket}")
+    if target_category in ("Motherboard", "RAM") and mem in ("DDR4", "DDR5"):
+        applied.append(f"memory_generation={mem}")
+    if target_category == "CPU" and brand:
+        applied.append(f"brand={brand}")
+    if target_category == "RAM" and constraints.get("mem_ambiguous"):
+        applied.append("memory_generation=DDR4/DDR5(待主機板版本確認)")
+        warnings.append(
+            "已選主機板為 Intel LGA1700,記憶體世代取決於主機板 DDR4/DDR5 版本;"
+            "已同時列出可能候選,請先確認主機板支援的世代再下單。")
+    if target_category == "Storage" and gaming:
+        applied.append("storage=SSD/NVMe/M.2(排除純 HDD 作主碟)")
+    if target_category == "PSU" and has_dgpu_expected:
+        applied.append("psu>=550W(含獨立顯卡)")
+
+    # 非平台關鍵類別:過濾後為空則回退,避免完全無候選
+    if not kept and target_category in ("Storage", "PSU"):
+        kept = [{**r, "_pf": _candidate_platform_fields(r, target_category)} for r in pool]
+        warnings.append(
+            f"此條件下找不到完全符合 {target_category} 規格門檻的商品,已放寬列出候選,請人工確認規格。")
+
+    return kept, applied, warnings
+
+
+def _pick_component_options(kept: list[dict], target_price: float | None, limit: int) -> list[dict]:
+    """從相容候選中挑出多樣化的 2~3(最多 limit)個:性價比 / 平衡 / 高階。
+
+    不是只回最便宜的;以價格分佈取低 / 中(或最接近 target)/ 高三個級距,去重後回傳,
+    並在每筆附 _tier 標籤。候選不足時回較少筆。
+    """
+    priced = [r for r in kept if r.get("price") is not None]
+    if not priced:
+        return []
+    priced.sort(key=lambda r: r["price"])
+
+    # 去除同型號重複(例:同一顆 i5-12400F 不同店家/價格),保留最便宜那筆,提高候選多樣性。
+    # 若去重後不足 limit,再把先前略過的補回來,確保仍能湊出足夠候選。
+    deduped: list[dict] = []
+    seen_models: set[str] = set()
+    leftovers: list[dict] = []
+    for r in priced:
+        mk = _normalize_model_key(r.get("model") or "") or _normalize_model_key(r.get("product_name") or "")
+        if mk and mk in seen_models:
+            leftovers.append(r)
+            continue
+        if mk:
+            seen_models.add(mk)
+        deduped.append(r)
+    priced = deduped if len(deduped) >= min(limit, 3) else (deduped + leftovers)
+    n = len(priced)
+    if n <= limit:
+        for i, r in enumerate(priced):
+            r["_tier"] = ("性價比", "平衡", "高階")[min(i, 2)] if n <= 3 else "候選"
+        return priced
+
+    # 平衡:最接近 target_price(沒有 target 就取中位數)
+    if target_price is not None:
+        bal_idx = min(range(n), key=lambda i: (abs(priced[i]["price"] - target_price), priced[i]["price"]))
+    else:
+        bal_idx = n // 2
+    value_idx = max(0, int(n * 0.15))
+    high_idx = min(n - 1, int(n * 0.85))
+
+    tiers: list[tuple[int, str]] = [(value_idx, "性價比"), (bal_idx, "平衡"), (high_idx, "高階")]
+    selected: list[dict] = []
+    used_idx: set[int] = set()
+    used_names: set[str] = set()
+    for idx, tier in tiers:
+        if len(selected) >= limit:
+            break
+        # 若該 idx 已被用,往後找一個未用的
+        j = idx
+        while j < n and (j in used_idx or priced[j].get("product_name") in used_names):
+            j += 1
+        if j >= n:
+            j = idx
+            while j >= 0 and (j in used_idx or priced[j].get("product_name") in used_names):
+                j -= 1
+        if 0 <= j < n and j not in used_idx and priced[j].get("product_name") not in used_names:
+            r = priced[j]
+            r["_tier"] = tier
+            selected.append(r)
+            used_idx.add(j)
+            used_names.add(r.get("product_name"))
+
+    # 若 limit > 3,補入其餘等距候選
+    if limit > len(selected):
+        for j in range(n):
+            if len(selected) >= limit:
+                break
+            if j in used_idx or priced[j].get("product_name") in used_names:
+                continue
+            r = priced[j]
+            r["_tier"] = "候選"
+            selected.append(r)
+            used_idx.add(j)
+            used_names.add(r.get("product_name"))
+
+    selected.sort(key=lambda r: r["price"])
+    return selected
+
+
+# 各用途下,某類別「目標單價」估算用的權重(沿用完整菜單引擎的權重觀念)
+def _is_office_inappropriate_cpu(row: dict) -> bool:
+    """判斷此 CPU 是否『不適合文書機作主推』(高階遊戲 / 高功耗 CPU)。
+
+    deterministic 依型號:X3D、Ryzen 9/R9、Intel i9 / Core Ultra 9、Intel K/KF、Core Ultra K。
+    """
+    name = (row.get("product_name") or "").upper()
+    if "X3D" in name:
+        return True
+    if re.search(r"RYZEN\s*9|\bR9\b", name):
+        return True
+    if re.search(r"\bI9\b|I9[-\s]?\d|CORE ULTRA\s*9|\bULTRA\s*9\b", name):
+        return True
+    if re.search(r"I[3579][-\s]?\d{4,5}[A-Z]*K", name):  # Intel K / KF (i5-14600K, i7-14700KF)
+        return True
+    if re.search(r"ULTRA\s*\d\s*\d{3}[A-Z]*K", name):    # Core Ultra K (Ultra 5 245K)
+        return True
+    return False
+
+
+def _gaming_cpu_min_price(budget: int | None) -> int | None:
+    """gaming 依整機預算給 CPU『最低價』門檻(高預算不主推中低階 CPU);資訊不足回 None。
+
+    - budget > 50000(高預算):CPU 至少約 budget×10%(下限 8000)→ 排除 i5-12400F / R5 5500 等。
+    - 25000 < budget <= 50000(中高):至少約 budget×6%(下限 3500)→ 排除極低階,但不過度拉高。
+    - budget <= 25000:不設門檻(入門/中階皆可)。
+    """
+    if not budget:
+        return None
+    b = int(budget)
+    if b > 50000:
+        return max(int(b * 0.10), 8000)
+    if b > 25000:
+        return max(int(b * 0.06), 3500)
+    return None
+
+
+def _gaming_cpu_tier_filter(kept: list[dict], budget: int | None) -> tuple[list[dict], list[str], list[str]]:
+    """gaming CPU 預算級距過濾:高預算時只留 >= 門檻的中高階 / 高階 CPU 作主推。
+
+    若門檻內候選 >= 2 個才收斂;較入門的 CPU 以『省預算 alternative』列入 warnings(不放主推)。
+    DB 高階候選不足時退回原候選,不硬擋。
+    """
+    applied: list[str] = []
+    warns: list[str] = []
+    floor = _gaming_cpu_min_price(budget)
+    if not floor or not kept:
+        return kept, applied, warns
+    high = [r for r in kept if (r.get("price") or 0) >= floor]
+    if len(high) >= 2:
+        applied.append(f"gaming高預算級距:CPU>=~{floor:,}元")
+        cheaper = [r for r in kept if (r.get("price") or 0) < floor]
+        if cheaper:
+            c = min(cheaper, key=lambda r: r.get("price") or 0)
+            warns.append(
+                f"若想省 CPU 預算,亦可考慮較入門的「{c.get('product_name')}」"
+                f"({int(c.get('price') or 0):,} 元);但此預算級距建議搭配較高階 CPU,"
+                f"以發揮高階顯示卡效能。")
+        return high, applied, warns
+    return kept, applied, warns
+
+
+# ---- GPU / 其他類別的 use_case + budget tier 過濾(deterministic) ----
+_GPU_PRO_KW = ("QUADRO", "TESLA", "FIREPRO", "RADEON PRO", "ARC PRO", "PROART",
+               "CREATOR", "WORKSTATION", "繪圖", "工作站", "專業卡", "CMP")
+
+
+def _is_workstation_gpu(row: dict) -> bool:
+    """是否為工作站 / 專業 / 非遊戲顯卡(Ada workstation / Quadro / ARC PRO / ProArt / Creator / ECC…)。"""
+    n = (row.get("product_name") or "").upper()
+    if any(k in n for k in _GPU_PRO_KW):
+        return True
+    if re.search(r"\bADA\b", n):       # RTX 2000/4000/6000 Ada 工作站卡
+        return True
+    if re.search(r"RTX\s?A\d", n):     # RTX A 系列工作站
+        return True
+    if "ECC" in n:                     # 專業卡常標 GDDR6 ECC
+        return True
+    return False
+
+
+def _is_gaming_gpu(row: dict) -> bool:
+    """是否為遊戲顯卡(GeForce RTX/GTX、Radeon RX、Intel Arc A/B gaming);排除工作站卡。"""
+    if _is_workstation_gpu(row):
+        return False
+    n = (row.get("product_name") or "").upper()
+    return bool(re.search(r"RTX\s?\d|GTX\s?\d|\bRX\s?\d|ARC\s?[AB]\d|RADEON\s?RX", n))
+
+
+def _gpu_min_price(budget: int | None) -> int | None:
+    """gaming GPU 依預算的最低價門檻(高預算不主推低階卡);資訊不足回 None。"""
+    if not budget:
+        return None
+    b = int(budget)
+    if b > 60000:
+        return max(int(b * 0.20), 16000)
+    if b > 40000:
+        return max(int(b * 0.15), 9000)
+    if b > 25000:
+        return max(int(b * 0.10), 6000)
+    return None
+
+
+def _apply_price_floor(kept: list[dict], floor: int | None, tag: str,
+                       alt_prefix: str | None = None) -> tuple[list[dict], list[str], list[str]]:
+    """保留 price >= floor 的候選(>=2 才收斂);較便宜者以 alt 提示放 warnings。"""
+    if not floor or not kept:
+        return kept, [], []
+    high = [r for r in kept if (r.get("price") or 0) >= floor]
+    if len(high) < 2:
+        return kept, [], []
+    applied = [tag]
+    warns: list[str] = []
+    cheaper = [r for r in kept if (r.get("price") or 0) < floor]
+    if cheaper and alt_prefix:
+        c = min(cheaper, key=lambda r: r.get("price") or 0)
+        warns.append(f"{alt_prefix}「{c.get('product_name')}」({int(c.get('price') or 0):,} 元)")
+    return high, applied, warns
+
+
+def _gpu_tier_filter(kept: list[dict], budget: int | None, uc: str) -> tuple[list[dict], list[str], list[str]]:
+    """gaming GPU:排除工作站/專業卡 + 依預算級距設最低價(高預算不主推低階卡)。"""
+    applied: list[str] = []
+    warns: list[str] = []
+    if uc not in ("gaming", "4k_gaming"):
+        return kept, applied, warns
+    gaming = [r for r in kept if not _is_workstation_gpu(r)]
+    if len(gaming) >= 2:
+        kept = gaming
+        applied.append("gaming GPU:排除工作站/專業卡(Ada/Quadro/ARC PRO/ProArt/Creator)")
+    floor = _gpu_min_price(budget)
+    if floor:
+        kept, ap, w = _apply_price_floor(
+            kept, floor, f"gaming GPU 預算級距:>=~{floor:,}元",
+            "若想省 GPU 預算,亦可考慮較入門的")
+        applied += ap
+        warns += w
+    return kept, applied, warns
+
+
+def _ram_tier_filter(kept: list[dict], budget: int | None, uc: str) -> tuple[list[dict], list[str], list[str]]:
+    """RAM:排除 ECC/伺服器記憶體;高預算 gaming 優先 32GB+。"""
+    applied: list[str] = []
+    warns: list[str] = []
+    consumer = [r for r in kept if "ECC" not in (r.get("product_name") or "").upper()]
+    if len(consumer) >= 2:
+        kept = consumer
+        applied.append("排除 ECC / 伺服器記憶體")
+    if uc in ("gaming", "4k_gaming") and budget and int(budget) > 50000:
+        big = [r for r in kept if (_ram_gb(_specs_of(r).get("capacity")) or 0) >= 32]
+        if len(big) >= 2:
+            kept = big
+            applied.append("高預算 gaming:RAM>=32GB")
+    return kept, applied, warns
+
+
+def _storage_tier_filter(kept: list[dict], budget: int | None, uc: str) -> tuple[list[dict], list[str], list[str]]:
+    """Storage:高預算 gaming 優先 1TB+ SSD(主系統碟 SSD 已在 _filter_candidates 保證)。"""
+    applied: list[str] = []
+    if uc in ("gaming", "4k_gaming") and budget and int(budget) > 50000:
+        big = [r for r in kept if (_cap_to_gb(_specs_of(r).get("capacity")) or 0) >= 1000]
+        if len(big) >= 2:
+            kept = big
+            applied.append("高預算 gaming:Storage>=1TB")
+    return kept, applied, []
+
+
+def _psu_tier_filter(kept: list[dict], budget: int | None, uc: str,
+                     gpu_price: int | None) -> tuple[list[dict], list[str], list[str]]:
+    """PSU:依預算 / 已選 GPU 等級設瓦數下限;低預算不硬推超高瓦數。"""
+    applied: list[str] = []
+
+    def watt(r):
+        return _specs_of(r).get("wattage") or 0
+
+    floor = 550 if uc in ("gaming", "4k_gaming") else 0
+    if uc in ("gaming", "4k_gaming") and budget:
+        b = int(budget)
+        if b > 60000:
+            floor = max(floor, 750)
+        elif b > 40000:
+            floor = max(floor, 650)
+    if gpu_price and gpu_price >= 20000:
+        floor = max(floor, 750)
+    if gpu_price and gpu_price >= 30000:
+        floor = max(floor, 850)
+    if floor:
+        hi = [r for r in kept if watt(r) >= floor]
+        if len(hi) >= 2:
+            kept = hi
+            applied.append(f"PSU>=~{floor}W")
+    # 低預算不要硬推超高瓦數(>850W)
+    if budget and int(budget) <= 35000:
+        cap = [r for r in kept if watt(r) <= 850]
+        if len(cap) >= 2:
+            kept = cap
+            applied.append("低預算:PSU<=850W")
+    return kept, applied, []
+
+
+def _mb_tier_filter(kept: list[dict], budget: int | None, constraints: dict) -> tuple[list[dict], list[str], list[str]]:
+    """Motherboard:高預算 / 高階 CPU 避免最低階板作主推(socket/世代仍由 _filter_candidates 守門)。"""
+    applied: list[str] = []
+    warns: list[str] = []
+    cpu_name = ((constraints.get("cpu_specs") or {}).get("product_name") or "").upper()
+    high_cpu = bool(re.search(r"X3D|RYZEN\s*9|\bR9\b|\bI9\b|ULTRA\s*[79]|\d{4,5}K", cpu_name))
+    floor = None
+    if budget and int(budget) > 50000:
+        floor = max(int(int(budget) * 0.05), 3000)
+    if high_cpu:
+        floor = max(floor or 0, 3000)
+    if floor:
+        kept, ap, w = _apply_price_floor(
+            kept, floor, f"主機板級距:>=~{floor:,}元",
+            "省預算可考慮較入門主機板")
+        applied += ap
+        warns += w
+    return kept, applied, warns
+
+
+def _case_tier_filter(kept: list[dict], budget: int | None) -> tuple[list[dict], list[str], list[str]]:
+    """Case:高預算避免只推超便宜小機殼,並提醒顯卡長度 / 散熱器高度 / airflow 需確認。"""
+    applied: list[str] = []
+    warns: list[str] = []
+    if budget and int(budget) > 50000:
+        floor = max(int(int(budget) * 0.02), 1500)
+        hi = [r for r in kept if (r.get("price") or 0) >= floor]
+        if len(hi) >= 2:
+            kept = hi
+            applied.append(f"機殼級距:>=~{floor:,}元")
+        warns.append("高預算 / 高階顯卡:請確認機殼可容納顯卡長度、散熱器高度與良好散熱(airflow);"
+                     "規格不足時需人工確認。")
+    return kept, applied, warns
+
+
+def _office_cpu_value_filter(kept: list[dict], budget: int | None) -> tuple[list[dict], list[str], list[str]]:
+    """office CPU 價值過濾:排除高階遊戲 CPU(X3D/R9/i9/Ultra9/K)與明顯超出文書需求的高價 CPU。
+
+    有足夠(>=2)文書合理候選時才收斂;否則保留原候選但加 warning。
+    """
+    applied: list[str] = []
+    warnings: list[str] = []
+    if not kept:
+        return kept, applied, warnings
+    reasonable = [r for r in kept if not _is_office_inappropriate_cpu(r)]
+    # 價格上限:文書 CPU 不應佔太高預算(約 45%,floor 7000);另設『文書用途絕對上限』~10000,
+    # 避免高預算把 i7/R7 這類過剩 CPU 拉進文書主推。足夠候選時才以此收斂。
+    if budget:
+        cap = min(max(int(int(budget) * 0.45), 7000), 10000)
+        priced_ok = [r for r in reasonable if (r.get("price") or 0) <= cap]
+        if len(priced_ok) >= 2:
+            reasonable = priced_ok
+    else:
+        priced_ok = [r for r in reasonable if (r.get("price") or 0) <= 10000]
+        if len(priced_ok) >= 2:
+            reasonable = priced_ok
+    if len(reasonable) >= 2:
+        applied.append("office=文書用途優先(排除高階遊戲/高功耗 CPU)")
+        if budget and int(budget) > int(_OFFICE_REASONABLE_TOTAL * 1.3):
+            warnings.append(
+                f"文書機通常不需花到 {int(budget):,} 元;以下為文書用途合理的內顯 CPU,"
+                f"不硬推高階遊戲 CPU。")
+        return reasonable, applied, warnings
+    # fallback:文書合理候選不足,保留原候選但提醒偏高階
+    warnings.append("資料庫中文書用途合理的內顯 CPU 不足;以下候選可能偏高階,文書用途通常不需要。")
+    return kept, applied, warnings
+
+
+def _target_price_for(category: str, budget: int | None, remaining_budget: int | None, uc: str) -> float | None:
+    """估一個該類別的目標單價,用於挑「平衡」候選;資訊不足回 None。"""
+    base = remaining_budget if remaining_budget else budget
+    if not base:
+        return None
+    weights = _OFFICE_WEIGHTS if uc == "office" else _GAMING_WEIGHTS
+    w = weights.get(category)
+    if w is None:
+        return None
+    # 用整體預算 * 類別權重作為目標單價估計(remaining_budget 已是剩餘,故直接用其相對比例)
+    return float(budget * w) if budget else float(base * w)
+
+
+def _build_reason(tier: str, category: str, pf: dict, gaming: bool) -> str:
+    """組出該候選的推薦原因(deterministic 文字)。"""
+    tier_txt = {
+        "性價比": "性價比/入門選擇,此相容範圍內價位較低",
+        "平衡": "平衡選擇,價位與規格折衷,適合多數使用情境",
+        "高階": "較高階選擇,效能/用料較佳,預算充足可考慮",
+        "候選": "相容候選之一",
+    }.get(tier, "相容候選")
+    extra = []
+    plat = pf.get("platform") or pf.get("socket")
+    if category in ("CPU", "Motherboard") and plat:
+        extra.append(f"平台 {plat}")
+    if category in ("Motherboard", "RAM") and pf.get("memory_generation"):
+        extra.append(pf["memory_generation"])
+    return tier_txt + ("(" + " / ".join(extra) + ")" if extra else "")
+
+
+def _build_compat_notes(category: str, pf: dict, constraints: dict[str, Any]) -> str:
+    """組出該候選的相容性說明(deterministic 文字)。"""
+    socket = pf.get("socket")
+    mem = pf.get("memory_generation")
+    csocket = constraints.get("socket")
+    cmem = constraints.get("memory_generation")
+    notes: list[str] = []
+
+    if category == "CPU":
+        if socket:
+            notes.append(f"{socket} / {mem or '記憶體世代依主機板'}")
+            if csocket:
+                notes.append("與已選平台一致" if socket == csocket else "與已選平台不一致")
+        else:
+            notes.append("平台無法由規格確認,需人工確認")
+    elif category == "Motherboard":
+        if socket:
+            notes.append(f"{socket} / {mem or 'DDR 世代依版本'}")
+            if csocket:
+                notes.append("socket 與已選 CPU 一致" if socket == csocket else "socket 與已選 CPU 不一致")
+        else:
+            notes.append("平台無法由規格確認,需人工確認")
+    elif category == "RAM":
+        if mem:
+            notes.append(mem)
+            if cmem in ("DDR4", "DDR5"):
+                notes.append("與已選主機板世代相容" if mem == cmem else "與已選主機板世代不相容")
+        else:
+            notes.append("記憶體世代無法確認,需人工確認")
+    elif category == "Storage":
+        notes.append("SSD/NVMe 類" if _is_ssd_pf(pf) else "請確認是否為 SSD 主碟")
+        notes.append("與平台無關,容量/介面需符合主機板 M.2/SATA 支援")
+    elif category == "PSU":
+        w = pf.get("wattage")
+        notes.append(f"{w}W" if w else "瓦數需確認")
+        notes.append("瓦數需 ≥ 顯卡建議值,接頭需符合顯卡供電")
+    elif category == "GPU":
+        notes.append("與 CPU/主機板平台無關;長度需符合機殼,供電需符合 PSU")
+    elif category == "Case":
+        notes.append("需確認可容納主機板尺寸 / 顯卡長度 / 散熱器高度 / 水冷排")
+    elif category == "Cooler":
+        notes.append("散熱器扣具(socket)/ 空冷高度 / AIO 水冷排尺寸需人工確認")
+    return ";".join(notes)
+
+
+def _is_ssd_pf(pf: dict) -> bool:
+    # pf 沒有完整 row,這裡僅用於文字提示的保守判斷;真正過濾在 _filter_candidates
+    return True
+
+
+def _recommend_component_options_legacy(
+    target_category: str,
+    *,
+    budget: int | None = None,
+    use_case: str = "gaming",
+    remaining_budget: int | None = None,
+    prefer_platform: str | None = None,
+    selected_cpu: str | None = None,
+    selected_motherboard: str | None = None,
+    selected_ram: str | None = None,
+    selected_gpu: str | None = None,
+    selected_storage: str | None = None,
+    selected_psu: str | None = None,
+    selected_case: str | None = None,
+    selected_cooler: str | None = None,
+    selected_socket: str | None = None,
+    selected_memory_generation: str | None = None,
+    limit: int = 3,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """**Legacy 內建推薦**:讀 DB + 我們自己的 filter / tier / ranking 決定 2~3 個候選。
+
+    這是 `USE_EXTERNAL_COMPONENT_RECOMMENDER=False`(或外部 recommender 未接 / 失敗)時的 fallback。
+    Returns dict:category / options / constraints_applied / warnings / next_step_suggestion。
+    每個 option 含 product_name / price / source / category / brand / model / socket /
+    platform / memory_generation / reason / compatibility_notes(無 DB 內部欄位)。
+    """
+    cat = _canonical_category(target_category)
+    if cat is None:
+        return {
+            "category": target_category,
+            "options": [],
+            "constraints_applied": [],
+            "warnings": [f"無法辨識的 target_category:{target_category}。"
+                         f"請用 {' / '.join(_COMPONENT_CATEGORIES)} 其中之一。"],
+            "next_step_suggestion": "",
+        }
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 3
+    limit = max(1, min(limit, 5))
+
+    uc = _classify_use_case(use_case)
+    gaming = uc != "office"
+
+    selected_map = _collect_selected({
+        "selected_cpu": selected_cpu, "selected_motherboard": selected_motherboard,
+        "selected_ram": selected_ram, "selected_gpu": selected_gpu,
+        "selected_storage": selected_storage, "selected_psu": selected_psu,
+        "selected_case": selected_case, "selected_cooler": selected_cooler,
+    })
+
+    constraints = _resolve_platform_constraints(
+        selected_map, prefer_platform, selected_socket, selected_memory_generation, db_path)
+
+    # 候選池(以 remaining_budget 或 budget 當價格上限,避免明顯超預算)
+    price_cap = remaining_budget if remaining_budget else budget
+    pool = query_products(category=cat, max_price=price_cap, limit=2000, db_path=db_path)
+
+    has_dgpu_expected = bool(selected_map.get("GPU")) or gaming
+    kept, applied, filter_warnings = _filter_candidates(
+        pool, cat, constraints, gaming, has_dgpu_expected)
+
+    # office CPU 價值過濾:在 iGPU 偏好之上,再排除高階遊戲/高功耗/高價 CPU(需 budget)
+    if cat == "CPU" and uc == "office":
+        kept, _ap, _w = _office_cpu_value_filter(kept, budget)
+        applied += _ap
+        filter_warnings += _w
+    # gaming / 4k CPU 預算級距:高預算遊戲機不把中低階 CPU 放主推(office 不套用)
+    elif cat == "CPU" and uc in ("gaming", "4k_gaming"):
+        kept, _ap, _w = _gaming_cpu_tier_filter(kept, budget)
+        applied += _ap
+        filter_warnings += _w
+    # GPU:gaming 排除工作站/專業卡 + 預算級距(高預算不主推低階卡)
+    elif cat == "GPU":
+        kept, _ap, _w = _gpu_tier_filter(kept, budget, uc)
+        applied += _ap
+        filter_warnings += _w
+    elif cat == "RAM":
+        kept, _ap, _w = _ram_tier_filter(kept, budget, uc)
+        applied += _ap
+        filter_warnings += _w
+    elif cat == "Storage":
+        kept, _ap, _w = _storage_tier_filter(kept, budget, uc)
+        applied += _ap
+        filter_warnings += _w
+    elif cat == "PSU":
+        _gpu_price = None
+        if selected_map.get("GPU"):
+            _gpu_price = _get_selected_product_specs(selected_map["GPU"], "GPU", db_path).get("price")
+        kept, _ap, _w = _psu_tier_filter(kept, budget, uc, _gpu_price)
+        applied += _ap
+        filter_warnings += _w
+    elif cat == "Motherboard":
+        kept, _ap, _w = _mb_tier_filter(kept, budget, constraints)
+        applied += _ap
+        filter_warnings += _w
+    elif cat == "Case":
+        kept, _ap, _w = _case_tier_filter(kept, budget)
+        applied += _ap
+        filter_warnings += _w
+
+    target_price = _target_price_for(cat, budget, remaining_budget, uc)
+    picks = _pick_component_options(kept, target_price, limit)
+
+    options: list[dict] = []
+    for r in picks:
+        pf = r.get("_pf") or _candidate_platform_fields(r, cat)
+        # PSU 補上 wattage 給說明用
+        if cat == "PSU":
+            pf = {**pf, "wattage": _specs_of(r).get("wattage")}
+        options.append({
+            "product_name": r.get("product_name"),
+            "price": r.get("price"),
+            "source": r.get("source"),
+            "category": cat,
+            "brand": r.get("brand"),
+            "model": r.get("model"),
+            "socket": pf.get("socket"),
+            "platform": pf.get("platform"),
+            "memory_generation": pf.get("memory_generation"),
+            "reason": _build_reason(r.get("_tier", "候選"), cat, pf, gaming),
+            "compatibility_notes": _build_compat_notes(cat, pf, constraints),
+            "is_virtual": False,
+        })
+
+    real_count = len(options)
+    warnings: list[str] = list(constraints.get("notes", [])) + list(filter_warnings)
+    cpu_specs = constraints.get("cpu_specs")
+
+    # ---- 虛擬「無」選項 ----
+    # Cooler:每次都固定多一個「無」選項(price=0);依 CPU 功耗決定是否加提醒。
+    if cat == "Cooler":
+        if cpu_specs and _cpu_needs_cooler_attention(cpu_specs.get("product_name")):
+            cnote = ("選『無』前請確認:此 CPU 可能為高功耗 / K / X3D / 高階款,可能需要額外散熱器;"
+                     "請確認 CPU 盒裝是否附原廠散熱器,以及機殼散熱與 CPU 溫度。")
+            warnings.append(cnote)
+        else:
+            cnote = "若 CPU 盒裝已附原廠散熱器或屬低功耗用途,選『無』可為合理選項;仍建議確認盒裝內容。"
+        options.append({
+            "product_name": _VIRTUAL_NONE_NAME["Cooler"], "price": 0, "source": _VIRTUAL_SOURCE,
+            "category": "Cooler", "brand": None, "model": None, "socket": None, "platform": None,
+            "memory_generation": None, "reason": "不額外購買散熱器(使用 CPU 盒裝原廠散熱器或既有散熱器)。",
+            "compatibility_notes": cnote, "is_virtual": True,
+        })
+
+    # GPU:文書(office)且已選 CPU 有內顯時,提供「無獨立顯示卡(使用內顯)」。
+    if cat == "GPU" and uc == "office" and (cpu_specs is None or cpu_specs.get("has_igpu") is True):
+        options.append({
+            "product_name": _VIRTUAL_NONE_NAME["GPU"], "price": 0, "source": _VIRTUAL_SOURCE,
+            "category": "GPU", "brand": None, "model": None, "socket": None, "platform": None,
+            "memory_generation": None,
+            "reason": "文書用途且 CPU 具內顯,可不裝獨立顯卡以節省預算。",
+            "compatibility_notes": "使用 CPU 內顯作為畫面輸出;若日後有遊戲/繪圖需求再加裝獨立顯卡。",
+            "is_virtual": True,
+        })
+
+    # 無內顯 CPU + 未選 GPU 提醒(規則 13);此時不提供 GPU『無』選項
+    if cpu_specs and cpu_specs.get("has_igpu") is False and "GPU" not in selected_map:
+        warnings.append(
+            f"已選 CPU『{cpu_specs.get('product_name')}』無內顯,尚未選顯示卡;"
+            f"此配置需搭配獨立顯卡(GPU)才有畫面輸出,不可選『無獨立顯示卡』。")
+
+    # 候選不足提醒(只計實體候選,不含虛擬『無』)
+    if real_count < min(limit, 3):
+        warnings.append(
+            f"此相容條件下 {cat} 實體候選僅 {real_count} 個"
+            f"(可能因平台/世代限制或預算上限);如需更多選擇可放寬條件或更新資料庫。")
+
+    # 下一步建議
+    chosen = set(selected_map.keys()) | {cat}
+    nxt = next((c for c in _SELECTION_ORDER if c not in chosen), None)
+    if nxt:
+        next_step = f"選定本類別後,建議下一步挑選:{_CATEGORY_LABEL_ZH.get(nxt, nxt)}。"
+    else:
+        next_step = "主要零件皆已挑選,可用 validate / summarize 工具檢查相容性與總價。"
+
+    return {
+        "category": cat,
+        "options": options,
+        "constraints_applied": applied,
+        "warnings": warnings,
+        "next_step_suggestion": next_step,
+    }
+
+
+# ============================================================================
+# External component recommender adapter(Phase External-Component-Recommender-Integration)
+# ----------------------------------------------------------------------------
+# 「要推薦哪些零組件候選」的邏輯可委派給外部 recommender(同學的實作)。
+# 本 adapter 負責:整理 context → 呼叫外部 → 正規化成現有 options schema →
+# 套用最小 safety validation + 固定虛擬「無」選項 → 回給互動流程。
+# 外部未接 / 關閉 / 失敗時,一律安全 fallback 到 legacy 內建推薦(功能不壞)。
+# ============================================================================
+
+# Feature flag:預設用 legacy(內建 tier/ranking)。設 True 並提供 recommender 才走外部。
+USE_EXTERNAL_COMPONENT_RECOMMENDER = False
+# 外部 recommender:callable(context: dict) -> list[dict](每個 dict 為一個候選)。None 表示未接。
+_EXTERNAL_COMPONENT_RECOMMENDER = None
+_EXTERNAL_ENV_LOADED = False
+
+
+def set_external_component_recommender(fn) -> None:
+    """註冊外部 component recommender(同學的函式)。fn(context) -> list[候選 dict]。
+
+    註冊後並把 USE_EXTERNAL_COMPONENT_RECOMMENDER 設為 True,即會改由外部決定候選。
+    """
+    global _EXTERNAL_COMPONENT_RECOMMENDER
+    _EXTERNAL_COMPONENT_RECOMMENDER = fn
+
+
+def _maybe_load_external_from_env() -> None:
+    """支援以環境變數 `PC_BUILDER_EXTERNAL_RECOMMENDER="pkg.module:func"` 接入(零改碼)。"""
+    global _EXTERNAL_ENV_LOADED, _EXTERNAL_COMPONENT_RECOMMENDER, USE_EXTERNAL_COMPONENT_RECOMMENDER
+    if _EXTERNAL_ENV_LOADED:
+        return
+    _EXTERNAL_ENV_LOADED = True
+    import os
+    spec = os.getenv("PC_BUILDER_EXTERNAL_RECOMMENDER")
+    if not spec or ":" not in spec:
+        return
+    mod_name, _, fn_name = spec.partition(":")
+    try:
+        import importlib
+        mod = importlib.import_module(mod_name.strip())
+        fn = getattr(mod, fn_name.strip())
+        _EXTERNAL_COMPONENT_RECOMMENDER = fn
+        USE_EXTERNAL_COMPONENT_RECOMMENDER = True
+    except Exception:
+        pass  # 接入失敗就維持 legacy,不讓系統壞掉
+
+
+def _external_recommender_active() -> bool:
+    _maybe_load_external_from_env()
+    return bool(USE_EXTERNAL_COMPONENT_RECOMMENDER and _EXTERNAL_COMPONENT_RECOMMENDER)
+
+
+def _build_recommender_context(
+    cat, *, budget, use_case, remaining_budget, prefer_platform, selected_map,
+    constraints, db_path,
+) -> dict:
+    """整理一份乾淨 context 給外部 recommender(含預算/用途/已選零件/相容性約束)。"""
+    selected_specs = {c: _get_selected_product_specs(n, c, db_path) for c, n in selected_map.items()}
+    total = sum(int(s.get("price") or 0) for s in selected_specs.values())
+    rb = remaining_budget if remaining_budget is not None else (
+        (int(budget) - total) if budget else None)
+    cpu_specs = constraints.get("cpu_specs") or selected_specs.get("CPU") or {}
+    return {
+        "target_category": cat,
+        "budget": int(budget) if budget else None,
+        "use_case": _classify_use_case(use_case),
+        "remaining_budget": rb,
+        "current_total": total,
+        "total_selected_price": total,
+        "prefer_platform": prefer_platform,
+        "limit": 3,
+        "db_path": db_path,
+        "selected_components": selected_specs,           # {category: 規格 dict(已 sanitize)}
+        "selected_cpu": selected_map.get("CPU"),
+        "selected_gpu": selected_map.get("GPU"),
+        "selected_motherboard": selected_map.get("Motherboard"),
+        "selected_ram": selected_map.get("RAM"),
+        "selected_storage": selected_map.get("Storage"),
+        "selected_psu": selected_map.get("PSU"),
+        "selected_cooler": selected_map.get("Cooler"),
+        "selected_case": selected_map.get("Case"),
+        # 相容性約束(供外部過濾;我們這邊也會再做一次 safety validation)
+        "constraints": {
+            "socket": constraints.get("socket"),
+            "memory_generation": constraints.get("memory_generation"),
+            "brand": constraints.get("brand"),
+        },
+        "cpu_has_igpu": cpu_specs.get("has_igpu"),
+    }
+
+
+def _normalize_external_option(raw: dict, cat: str, db_path: str) -> dict:
+    """把外部回傳的候選正規化成現有 options schema;不外洩 DB 內部欄位。
+
+    支援兩種輸入:(a) 已成形的 option dict;(b) 原始 DB product dict(含 specs)。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    if raw.get("is_virtual"):  # 外部若直接給虛擬「無」選項,原樣保留(僅取白名單欄位)
+        return {
+            "category": cat, "product_name": raw.get("product_name"), "price": 0,
+            "source": raw.get("source") or _VIRTUAL_SOURCE, "source_url": raw.get("source_url"),
+            "socket": None, "platform": None, "memory_generation": None,
+            "brand": None, "model": None,
+            "reason": raw.get("reason") or raw.get("recommendation_reason"),
+            "compatibility_notes": raw.get("compatibility_notes"), "is_virtual": True,
+        }
+    pf = _candidate_platform_fields(raw, cat)
+    return {
+        "category": cat,
+        "product_name": raw.get("product_name"),
+        "price": raw.get("price"),
+        "source": raw.get("source"),
+        "source_url": raw.get("source_url") or raw.get("url"),
+        "brand": raw.get("brand") or _pr.cpu_brand_from_text(raw.get("product_name")),
+        "model": raw.get("model"),
+        "socket": raw.get("socket") or pf.get("socket"),
+        "platform": raw.get("platform") or pf.get("platform"),
+        "memory_generation": raw.get("memory_generation") or pf.get("memory_generation"),
+        "reason": raw.get("reason") or raw.get("recommendation_reason") or "外部 recommender 推薦",
+        "compatibility_notes": raw.get("compatibility_notes") or _build_compat_notes(cat, pf, {}),
+        "is_virtual": False,
+    }
+
+
+def _safety_filter_options(cat, options, constraints, selected_map, uc):
+    """最小 safety validation:過濾明顯不相容的外部候選,回 (filtered, warnings)。
+
+    - CPU/Motherboard:socket 與已選平台不符 → 過濾。
+    - RAM:記憶體世代與主機板不相容 → 過濾。
+    - Intel/AMD 品牌約束(CPU)→ 過濾。
+    """
+    socket = constraints.get("socket")
+    mem = constraints.get("memory_generation")
+    brand = constraints.get("brand")
+    kept = []
+    warns = []
+    dropped = 0
+    for o in options:
+        if o.get("is_virtual"):
+            kept.append(o)
+            continue
+        if cat in ("CPU", "Motherboard") and socket and o.get("socket") and o["socket"] != socket:
+            dropped += 1
+            continue
+        if cat == "CPU" and brand and o.get("brand") and o["brand"] != brand:
+            dropped += 1
+            continue
+        if cat == "Motherboard" and mem in ("DDR4", "DDR5") and o.get("memory_generation"):
+            if not _mem_compatible(mem, o["memory_generation"]):
+                dropped += 1
+                continue
+        if cat == "RAM" and mem in ("DDR4", "DDR5") and o.get("memory_generation"):
+            if o["memory_generation"] != mem:
+                dropped += 1
+                continue
+        kept.append(o)
+    if dropped:
+        warns.append(f"外部 recommender 回傳 {dropped} 個與已選平台不相容的 {cat} 候選,已過濾。")
+    return kept, warns
+
+
+def _inject_virtual_none_options(cat, options, uc, cpu_specs, selected_map, limit):
+    """為 GPU(office+內顯)與 Cooler 固定加上虛擬「無」選項(與 legacy 行為一致),回 (options, warnings)。"""
+    warns = []
+    real_count = sum(1 for o in options if not o.get("is_virtual"))
+    has_none = any(o.get("is_virtual") for o in options)
+    if cat == "Cooler" and not has_none:
+        if cpu_specs and _cpu_needs_cooler_attention(cpu_specs.get("product_name")):
+            cnote = ("選『無』前請確認:此 CPU 可能為高功耗 / K / X3D / 高階款,可能需要額外散熱器;"
+                     "請確認 CPU 盒裝是否附原廠散熱器,以及機殼散熱與 CPU 溫度。")
+            warns.append(cnote)
+        else:
+            cnote = "若 CPU 盒裝已附原廠散熱器或屬低功耗用途,選『無』可為合理選項;仍建議確認盒裝內容。"
+        options = options + [{
+            "category": "Cooler", "product_name": _VIRTUAL_NONE_NAME["Cooler"], "price": 0,
+            "source": _VIRTUAL_SOURCE, "source_url": None, "brand": None, "model": None,
+            "socket": None, "platform": None, "memory_generation": None,
+            "reason": "不額外購買散熱器(使用 CPU 盒裝原廠散熱器或既有散熱器)。",
+            "compatibility_notes": cnote, "is_virtual": True,
+        }]
+    if cat == "GPU" and uc == "office" and (cpu_specs is None or cpu_specs.get("has_igpu") is True) and not has_none:
+        options = options + [{
+            "category": "GPU", "product_name": _VIRTUAL_NONE_NAME["GPU"], "price": 0,
+            "source": _VIRTUAL_SOURCE, "source_url": None, "brand": None, "model": None,
+            "socket": None, "platform": None, "memory_generation": None,
+            "reason": "文書用途且 CPU 具內顯,可不裝獨立顯卡以節省預算。",
+            "compatibility_notes": "使用 CPU 內顯作為畫面輸出;若日後有遊戲/繪圖需求再加裝獨立顯卡。",
+            "is_virtual": True,
+        }]
+    if cat == "GPU" and cpu_specs and cpu_specs.get("has_igpu") is False and "GPU" not in selected_map:
+        warns.append(
+            f"已選 CPU『{cpu_specs.get('product_name')}』無內顯,尚未選顯示卡;"
+            f"此配置需搭配獨立顯卡(GPU)才有畫面輸出,不可選『無獨立顯示卡』。")
+    if real_count < min(limit, 3):
+        warns.append(f"外部 recommender 回傳的 {cat} 實體候選僅 {real_count} 個。")
+    return options, warns
+
+
+def _recommend_component_options_external(
+    target_category, *, budget=None, use_case="gaming", remaining_budget=None,
+    prefer_platform=None, selected_cpu=None, selected_motherboard=None, selected_ram=None,
+    selected_gpu=None, selected_storage=None, selected_psu=None, selected_case=None,
+    selected_cooler=None, selected_socket=None, selected_memory_generation=None,
+    limit=3, db_path=DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """委派給外部 recommender,再轉成現有 options schema + 套 safety validation + 虛擬「無」。"""
+    cat = _canonical_category(target_category)
+    if cat is None:
+        return {"category": target_category, "options": [], "constraints_applied": [],
+                "warnings": [f"無法辨識的 target_category:{target_category}。"], "next_step_suggestion": ""}
+    try:
+        limit = max(1, min(int(limit), 5))
+    except (TypeError, ValueError):
+        limit = 3
+    uc = _classify_use_case(use_case)
+    selected_map = _collect_selected({
+        "selected_cpu": selected_cpu, "selected_motherboard": selected_motherboard,
+        "selected_ram": selected_ram, "selected_gpu": selected_gpu,
+        "selected_storage": selected_storage, "selected_psu": selected_psu,
+        "selected_case": selected_case, "selected_cooler": selected_cooler,
+    })
+    constraints = _resolve_platform_constraints(
+        selected_map, prefer_platform, selected_socket, selected_memory_generation, db_path)
+    context = _build_recommender_context(
+        cat, budget=budget, use_case=use_case, remaining_budget=remaining_budget,
+        prefer_platform=prefer_platform, selected_map=selected_map,
+        constraints=constraints, db_path=db_path)
+
+    raw = _EXTERNAL_COMPONENT_RECOMMENDER(context) or []   # 同學的邏輯決定候選
+    options = [_normalize_external_option(o, cat, db_path) for o in raw if isinstance(o, dict)]
+    options = [o for o in options if o.get("product_name")]
+
+    options, safety_warns = _safety_filter_options(cat, options, constraints, selected_map, uc)
+    options, vwarns = _inject_virtual_none_options(
+        cat, options, uc, constraints.get("cpu_specs"), selected_map, limit)
+    # 截斷實體候選到 limit(虛擬「無」保留)
+    real = [o for o in options if not o.get("is_virtual")][:limit]
+    virtual = [o for o in options if o.get("is_virtual")]
+    options = real + virtual
+
+    warnings = list(constraints.get("notes", [])) + safety_warns + vwarns
+    applied = ["external_recommender"]
+    if constraints.get("socket"):
+        applied.append(f"socket={constraints['socket']}")
+    if constraints.get("memory_generation") in ("DDR4", "DDR5"):
+        applied.append(f"memory_generation={constraints['memory_generation']}")
+
+    chosen = set(selected_map.keys()) | {cat}
+    nxt = next((c for c in _SELECTION_ORDER if c not in chosen), None)
+    next_step = (f"選定本類別後,建議下一步挑選:{_CATEGORY_LABEL_ZH.get(nxt, nxt)}。" if nxt
+                 else "主要零件皆已挑選,可用 validate / summarize 工具檢查相容性與總價。")
+    return {
+        "category": cat, "options": options, "constraints_applied": applied,
+        "warnings": warnings, "next_step_suggestion": next_step,
+    }
+
+
+def recommend_component_options(target_category: str, **kwargs) -> dict[str, Any]:
+    """**Dispatcher**:依 feature flag 決定由外部 recommender 或 legacy 內建邏輯決定候選。
+
+    - `USE_EXTERNAL_COMPONENT_RECOMMENDER=True` 且已註冊外部 recommender → 走外部 + adapter。
+    - 否則(預設)或外部失敗 → 安全 fallback 到 legacy 內建推薦。
+    回傳 schema 與 legacy 一致(category / options / constraints_applied / warnings / next_step_suggestion)。
+    """
+    if _external_recommender_active():
+        try:
+            res = _recommend_component_options_external(target_category, **kwargs)
+        except Exception as exc:  # 外部出錯 → 安全退回 legacy,不 traceback、不讓互動流程壞掉
+            leg = _recommend_component_options_legacy(target_category, **kwargs)
+            leg.setdefault("warnings", []).insert(
+                0, f"外部 recommender 失敗,已改用內建推薦({exc})。")
+            return leg
+        # 外部回傳空(無實體候選)→ fallback legacy 並加 warning(legacy 僅為備援)
+        if not any(not o.get("is_virtual") for o in res.get("options", [])):
+            leg = _recommend_component_options_legacy(target_category, **kwargs)
+            leg.setdefault("warnings", []).insert(
+                0, "外部 recommender 沒有回傳有效候選,已改用內建推薦。")
+            return leg
+        return res
+    return _recommend_component_options_legacy(target_category, **kwargs)
+
+
+def validate_selected_build(
+    *,
+    use_case: str = "gaming",
+    budget: int | None = None,
+    selected_cpu: str | None = None,
+    selected_motherboard: str | None = None,
+    selected_ram: str | None = None,
+    selected_gpu: str | None = None,
+    selected_storage: str | None = None,
+    selected_psu: str | None = None,
+    selected_case: str | None = None,
+    selected_cooler: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """deterministic 檢查目前已選零件是否相容。
+
+    Returns dict:is_valid / issues / warnings / selected_summary /
+    missing_categories / total_price / compatibility_summary。
+    """
+    uc = _classify_use_case(use_case)
+    gaming = uc != "office"
+    selected_map = _collect_selected({
+        "selected_cpu": selected_cpu, "selected_motherboard": selected_motherboard,
+        "selected_ram": selected_ram, "selected_gpu": selected_gpu,
+        "selected_storage": selected_storage, "selected_psu": selected_psu,
+        "selected_case": selected_case, "selected_cooler": selected_cooler,
+    })
+
+    specs: dict[str, dict] = {}
+    rows: dict[str, dict] = {}
+    issues: list[str] = []
+    warnings: list[str] = []
+    for cat, name in selected_map.items():
+        sp = _get_selected_product_specs(name, cat, db_path)
+        specs[cat] = sp
+        rows[cat] = _match_selected_product(name, cat, db_path)["row"] or {}
+        # 比對透明度提醒:找不到 / 模糊比對 / 多筆同分
+        if not sp.get("found"):
+            warnings.append(
+                f"已選 {cat}『{name}』在資料庫中找不到對應商品,該零件的價格/規格未納入計算;"
+                f"請改用工具回傳的完整 product_name。")
+        elif sp.get("ambiguous"):
+            warnings.append(
+                f"已選 {cat}『{name}』以模糊比對對應到多筆商品,已採用『{sp.get('product_name')}』"
+                f"(價格 {sp.get('price')});若非預期請改用完整 product_name。")
+        elif sp.get("match_level") in _FUZZY_LEVELS:
+            warnings.append(
+                f"已選 {cat}『{name}』以模糊比對對應到『{sp.get('product_name')}』;"
+                f"若非預期請改用工具回傳的完整 product_name。")
+
+    # 1) CPU / Motherboard socket 一致
+    if "CPU" in specs and "Motherboard" in specs:
+        cs = specs["CPU"]["socket"]
+        ms = specs["Motherboard"]["socket"]
+        if cs and ms:
+            if cs != ms:
+                issues.append(f"CPU socket({cs})與主機板 socket({ms})不一致,無法安裝。")
+        else:
+            warnings.append("CPU 或主機板 socket 無法由規格確認,需人工確認相容性。")
+
+    # 2) Motherboard / RAM 記憶體世代相容
+    if "Motherboard" in specs and "RAM" in specs:
+        mm = specs["Motherboard"]["memory_generation"]
+        rm = specs["RAM"]["memory_generation"]
+        if mm and rm:
+            if not _mem_compatible(rm, mm):
+                issues.append(f"主機板記憶體世代({mm})與記憶體({rm})不相容。")
+        else:
+            warnings.append("主機板或記憶體的世代無法確認,需人工確認 DDR4/DDR5。")
+
+    # GPU 是否為真實獨顯(非『無』虛擬選項)
+    gpu_is_none = ("GPU" in specs) and bool(specs["GPU"].get("is_virtual"))
+    gpu_real = ("GPU" in selected_map) and not gpu_is_none
+
+    # 3) 顯示輸出守門:沒有真實獨顯時 CPU 必須有內顯(警告)
+    if "CPU" in specs and not gpu_real:
+        if specs["CPU"].get("has_igpu") is False:
+            who = "選了『無獨立顯示卡』" if gpu_is_none else "尚未選顯示卡"
+            warnings.append(
+                f"已選 CPU『{specs['CPU'].get('product_name')}』無內顯且{who};"
+                f"需加裝獨立顯卡(GPU)才有畫面輸出。")
+
+    # 4) gaming 有『真實獨顯』時 PSU >= 550W(警告);GPU=無 不需要
+    if gaming and gpu_real and "PSU" in selected_map:
+        w = _specs_of(rows.get("PSU", {})).get("wattage")
+        if w is None:
+            warnings.append("電源瓦數無法確認,建議確認是否 ≥ 550W(含獨立顯卡)。")
+        elif w < 550:
+            warnings.append(f"電源僅 {w}W;含獨立顯卡建議至少 550W(高階顯卡更高)。")
+
+    # 5) gaming Storage 必須是 SSD 類(警告)
+    if gaming and "Storage" in selected_map and not specs["Storage"].get("is_virtual"):
+        if not _is_ssd_storage(rows.get("Storage", {})):
+            warnings.append("已選儲存裝置可能為純 HDD;遊戲主要儲存建議使用 SSD/NVMe。")
+
+    # 6) Cooler=無 + 高功耗 CPU(警告)
+    if ("Cooler" in specs) and specs["Cooler"].get("is_virtual"):
+        cpu_name = specs.get("CPU", {}).get("product_name")
+        if "CPU" in specs and _cpu_needs_cooler_attention(cpu_name):
+            warnings.append(
+                f"已選 Cooler=無,但 CPU『{cpu_name}』可能為高功耗 / K / X3D / 高階款;"
+                f"請確認 CPU 盒裝是否附原廠散熱器,以及機殼散熱與 CPU 溫度,必要時需加購散熱器。")
+
+    # 摘要
+    selected_summary = []
+    total_price = 0
+    for cat in _SELECTION_ORDER:
+        if cat in selected_map:
+            p = specs[cat].get("price")
+            if isinstance(p, int):
+                total_price += p
+            selected_summary.append({
+                "category": cat,
+                "product_name": specs[cat].get("product_name"),
+                "price": p,
+                "source": specs[cat].get("source"),
+                "socket": specs[cat].get("socket"),
+                "memory_generation": specs[cat].get("memory_generation"),
+                "is_virtual": bool(specs[cat].get("is_virtual")),
+            })
+
+    missing_categories = [c for c in _SELECTION_ORDER if c not in selected_map]
+    # 文書機不需獨顯,GPU 不算缺
+    if uc == "office" and "GPU" in missing_categories:
+        missing_categories = [c for c in missing_categories if c != "GPU"]
+
+    is_valid = len(issues) == 0
+    if "CPU" in specs and "Motherboard" in specs and not issues:
+        compat = f"已選 CPU/主機板 socket 一致({specs['CPU'].get('socket')})"
+        if "RAM" in specs:
+            compat += f";記憶體世代 {specs['RAM'].get('memory_generation')} 與主機板相容"
+        compat += "。其餘(機殼空間/散熱器高度/供電接頭)仍需人工確認。"
+    elif issues:
+        compat = "偵測到相容性問題:" + ";".join(issues)
+    else:
+        compat = "目前已選零件不足以完整驗證相容性(尚缺 CPU/主機板/RAM 之一)。"
+
+    return {
+        "is_valid": is_valid,
+        "issues": issues,
+        "warnings": warnings,
+        "selected_summary": selected_summary,
+        "missing_categories": missing_categories,
+        "total_price": total_price,
+        "compatibility_summary": compat,
+    }
+
+
+def summarize_selected_build(
+    *,
+    use_case: str = "gaming",
+    budget: int | None = None,
+    selected_cpu: str | None = None,
+    selected_motherboard: str | None = None,
+    selected_ram: str | None = None,
+    selected_gpu: str | None = None,
+    selected_storage: str | None = None,
+    selected_psu: str | None = None,
+    selected_case: str | None = None,
+    selected_cooler: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """彙整目前已選零件:清單 / 總價 / 預算 / 剩餘預算 / 缺少類別 / 相容性 / 下一步。
+
+    Returns dict:selected_summary / total_price / budget / remaining_budget /
+    missing_categories / compatibility_summary / next_recommended_category /
+    next_recommended_category_key / is_complete / warnings。
+    """
+    v = validate_selected_build(
+        use_case=use_case, budget=budget,
+        selected_cpu=selected_cpu, selected_motherboard=selected_motherboard,
+        selected_ram=selected_ram, selected_gpu=selected_gpu,
+        selected_storage=selected_storage, selected_psu=selected_psu,
+        selected_case=selected_case, selected_cooler=selected_cooler,
+        db_path=db_path,
+    )
+    total_price = v["total_price"]
+    remaining = (int(budget) - total_price) if budget else None
+
+    # 下一步:依固定順序(get_next_component_category);office 的 GPU 也算需選(可選『無』)。
+    selected_map = _collect_selected({
+        "selected_cpu": selected_cpu, "selected_motherboard": selected_motherboard,
+        "selected_ram": selected_ram, "selected_gpu": selected_gpu,
+        "selected_storage": selected_storage, "selected_psu": selected_psu,
+        "selected_case": selected_case, "selected_cooler": selected_cooler,
+    })
+    next_cat = get_next_component_category(selected_map, use_case)
+    next_recommended = _CATEGORY_LABEL_ZH.get(next_cat, next_cat) if next_cat else None
+    is_complete = next_cat is None
+
+    warnings = list(v["warnings"])
+    if not v["is_valid"]:
+        warnings = v["issues"] + warnings
+    if remaining is not None and remaining < 0:
+        warnings.append(f"已選零件總價 {total_price} 元已超出預算 {budget} 元 {abs(remaining)} 元。")
+    elif remaining is not None and budget and remaining > int(budget) * 0.3:
+        warnings.append(
+            f"目前總價 {total_price} 元,離預算 {budget} 元尚有 {remaining} 元;"
+            f"若想用滿預算,可考慮升級 GPU / CPU / Storage。")
+
+    return {
+        "selected_summary": v["selected_summary"],
+        "total_price": total_price,
+        "budget": int(budget) if budget else None,
+        "remaining_budget": remaining,
+        "missing_categories": v["missing_categories"],
+        "compatibility_summary": v["compatibility_summary"],
+        "next_recommended_category": next_recommended,
+        "next_recommended_category_key": next_cat,
+        "is_complete": is_complete,
+        "warnings": warnings,
+    }
+
+
+# ============================================================================
+# 保存最終菜單為 JSON(互動式選件完成後;只在使用者明確確認時呼叫)
+# ============================================================================
+
+_DEFAULT_BUILD_OUTPUT_DIR = "outputs/builds"
+
+
+def build_selected_build_payload(
+    selected_map: dict[str, str],
+    *,
+    budget: int | None,
+    use_case: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """把已選零件整理成可保存 / 顯示的 build payload(含 virtual 選項)。"""
+    v = validate_selected_build(
+        use_case=use_case, budget=budget,
+        selected_cpu=selected_map.get("CPU"), selected_motherboard=selected_map.get("Motherboard"),
+        selected_ram=selected_map.get("RAM"), selected_gpu=selected_map.get("GPU"),
+        selected_storage=selected_map.get("Storage"), selected_psu=selected_map.get("PSU"),
+        selected_case=selected_map.get("Case"), selected_cooler=selected_map.get("Cooler"),
+        db_path=db_path,
+    )
+    components: list[dict] = []
+    for cat in COMPONENT_SELECTION_ORDER:
+        if cat not in selected_map:
+            continue
+        sp = _get_selected_product_specs(selected_map[cat], cat, db_path)
+        components.append({
+            "category": cat,
+            "product_name": sp.get("product_name"),
+            "price": sp.get("price") or 0,
+            "source": sp.get("source"),
+            "socket": sp.get("socket"),
+            "platform": sp.get("platform"),
+            "memory_generation": sp.get("memory_generation"),
+            "is_virtual": bool(sp.get("is_virtual")),
+        })
+    total_price = sum(int(c["price"]) for c in components if isinstance(c["price"], int))
+    remaining = (int(budget) - total_price) if budget else None
+    warnings = list(v["warnings"])
+    if not v["is_valid"]:
+        warnings = v["issues"] + warnings
+    return {
+        "budget": int(budget) if budget else None,
+        "use_case": _classify_use_case(use_case),
+        "total_price": total_price,
+        "remaining_budget": remaining,
+        "components": components,
+        "compatibility_summary": v["compatibility_summary"],
+        "warnings": warnings,
+        "missing_categories": v["missing_categories"],
+    }
+
+
+def save_selected_build(
+    selected_map: dict[str, str],
+    *,
+    budget: int | None,
+    use_case: str,
+    created_at: str,
+    output_dir: str = _DEFAULT_BUILD_OUTPUT_DIR,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """把最終菜單寫成 JSON 檔(不覆蓋舊檔;不寫 data/)。
+
+    created_at 由呼叫端(tool 層)以當下時間帶入,檔名用其時間戳。回傳
+    ok / output_path / total_price / component_count / warnings。
+    """
+    payload = build_selected_build_payload(
+        selected_map, budget=budget, use_case=use_case, db_path=db_path)
+    payload = {"created_at": created_at, **payload}
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # 檔名時間戳:由 created_at 取數字部分,失敗則用安全字串
+    stamp = re.sub(r"[^0-9]", "", created_at)[:14] or "build"
+    base = f"pc_build_{stamp}"
+    path = out_dir / f"{base}.json"
+    n = 2
+    while path.exists():  # 不覆蓋舊檔
+        path = out_dir / f"{base}_{n}.json"
+        n += 1
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "ok": True,
+        "output_path": str(path),
+        "total_price": payload["total_price"],
+        "component_count": len(payload["components"]),
+        "warnings": payload["warnings"],
+    }
+
+
+# ============================================================================
+# State-driven 互動式選件引擎(Phase Interactive-State-Driven-Fix)
+# 第 N 個解析 / 下一步類別 / selected_components 更新 / 渲染 全部 deterministic,
+# 不依賴 LLM tool-calling,避免跳過工具或自寫候選。
+# ============================================================================
+
+_ARG_KEY = {
+    "CPU": "selected_cpu", "GPU": "selected_gpu", "Motherboard": "selected_motherboard",
+    "RAM": "selected_ram", "Storage": "selected_storage", "PSU": "selected_psu",
+    "Cooler": "selected_cooler", "Case": "selected_case",
+}
+_ZH_NUM = {"一": 1, "二": 2, "兩": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9}
+_RESELECT_VERBS = ("重新選", "重選", "重新挑", "換", "太貴")
+_CAT_WORD = {
+    "cpu": "CPU", "處理器": "CPU", "顯示卡": "GPU", "顯卡": "GPU", "gpu": "GPU",
+    "主機板": "Motherboard", "記憶體": "RAM", "ram": "RAM", "儲存": "Storage",
+    "硬碟": "Storage", "ssd": "Storage", "電源": "PSU", "psu": "PSU",
+    "散熱器": "Cooler", "散熱": "Cooler", "機殼": "Case",
+}
+_BUILD_INTENT = ("組電腦", "組一台", "組一臺", "組機", "遊戲機", "文書機", "辦公機",
+                 "工作機", "配一台", "組遊戲", "組台電腦", "裝一台")
+_PRICE_QUERY = ("優惠", "特價", "折扣", "比價", "多少錢", "報價", "促銷", "庫存",
+                "現貨", "搭主機板", "bundle", "搭板", "deal")
+
+
+def _parse_choice_index(text: str | None) -> int | None:
+    """由文字解析使用者要選『第幾個』;解析不出回 None。"""
+    if not text:
+        return None
+    t = str(text).strip()
+    m = re.search(r"第\s*([0-9一二兩三四五六七八九])\s*[個張顆隻支台片條]?", t)
+    if m:
+        g = m.group(1)
+        return int(g) if g.isdigit() else _ZH_NUM.get(g)
+    m = re.search(r"(?:選|選擇|要|挑)\s*第?\s*([0-9]{1,2})", t)
+    if m:
+        return int(m.group(1))
+    m = re.fullmatch(r"\s*([0-9]{1,2})\s*", t)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _is_none_intent(text: str | None) -> bool:
+    if not text:
+        return False
+    return any(k in text for k in ("無", "不買", "不需要", "不額外", "不用買", "不裝", "跳過", "略過"))
+
+
+def resolve_selection_from_last_options(
+    user_text: str | None, last_options: list | None, current_target_category: str | None = None
+) -> dict | None:
+    """由 state.last_component_options + 使用者文字 deterministic 解析所選候選;解析不出回 None。
+
+    - 『第 N 個 / 選 N / N』→ last_options[N-1]。
+    - 『無 / 不買 / 不需要』且當前類別為 Cooler / GPU → 該類的虛擬『無』選項(若存在)。
+    """
+    if not last_options:
+        return None
+    if current_target_category in ("Cooler", "GPU") and _is_none_intent(user_text):
+        for o in last_options:
+            if o.get("is_virtual"):
+                return o
+    idx = _parse_choice_index(user_text)
+    if idx and 1 <= idx <= len(last_options):
+        return last_options[idx - 1]
+    return None
+
+
+def _option_to_selected(option: dict, category: str) -> dict:
+    """把推薦候選 option 正規化成 selected_components 條目。"""
+    return {
+        "category": category,
+        "product_name": option.get("product_name"),
+        "price": option.get("price") or 0,
+        "source": option.get("source"),
+        "socket": option.get("socket"),
+        "platform": option.get("platform"),
+        "memory_generation": option.get("memory_generation"),
+        "is_virtual": bool(option.get("is_virtual")),
+    }
+
+
+def detect_reselect_category(text: str | None) -> str | None:
+    """偵測『重新選/換/太貴 + 某類別』;回 canonical 類別或 None。"""
+    if not text or not any(v in text for v in _RESELECT_VERBS):
+        return None
+    low = text.lower()
+    for w, cat in _CAT_WORD.items():
+        if w in low:
+            return cat
+    return None
+
+
+def is_confirm_save_text(text: str | None) -> bool:
+    if not text:
+        return False
+    if any(k in text for k in ("確認此菜單", "確認菜單", "確認這套", "確認配置", "就這套",
+                               "就這台", "保存", "存成json", "存成 json", "存檔", "存起來",
+                               "輸出json", "輸出 json", "存成檔", "保存成")):
+        return True
+    return text.strip() in ("確認", "確定", "OK", "ok", "好", "就這套")
+
+
+def is_explicit_full_menu_text(text: str | None) -> bool:
+    if not text:
+        return False
+    return any(k in text for k in ("完整菜單", "完整 8 類", "完整8類", "一次配好", "不用讓我選",
+                                   "直接產生完整", "直接幫我配", "直接配一台", "直接配好",
+                                   "一次給整套", "整套配好", "一次給我完整"))
+
+
+def _detect_brand_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    t = text.lower()
+    if "都可以" in text or "都行" in text or "都ok" in t:
+        return None
+    has_amd = ("amd" in t) or ("ryzen" in t)
+    has_intel = ("intel" in t) or bool(re.search(r"\bi[3579]\b", t)) or ("core ultra" in t)
+    if has_amd and has_intel:
+        return None
+    if has_amd:
+        return "AMD"
+    if has_intel:
+        return "Intel"
+    return None
+
+
+_CN_DIGIT = {"零": 0, "〇": 0, "一": 1, "二": 2, "兩": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_num(s: str | None) -> float | None:
+    """把小數量級的中文/阿拉伯數字字串轉成數值;轉不出回 None。
+
+    支援:'5' / '1.5' / '一'(1) / '兩'(2) / '十'(10) / '十二'(12) / '二十'(20) / '二十五'(25)。
+    """
+    if not s:
+        return None
+    s = s.strip()
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", s):
+        return float(s) if "." in s else int(s)
+    if s == "十":
+        return 10
+    if "十" in s:
+        left, _, right = s.partition("十")
+        tens = _CN_DIGIT.get(left, 1) if left else 1
+        ones = _CN_DIGIT.get(right, 0) if right else 0
+        return tens * 10 + ones
+    if len(s) == 1 and s in _CN_DIGIT:
+        return _CN_DIGIT[s]
+    # 多位純中文個位數(罕見)取第一個
+    return _CN_DIGIT.get(s[0]) if s and s[0] in _CN_DIGIT else None
+
+
+def _extract_budget_from_text(text: str | None) -> int | None:
+    """從文字解析預算(支援中文金額);避免把商品型號數字(RTX 5070 / i5-12400F / B650 / DDR5)當預算。"""
+    if not text:
+        return None
+
+    # 1) 『<數>萬<數?>』:數可為阿拉伯或中文(十萬 / 十二萬 / 三萬 / 一萬五 / 5萬5 / 1.5萬)
+    m = re.search(
+        r"([0-9]+(?:\.[0-9]+)?|[零〇一二兩三四五六七八九十]+)\s*萬\s*([0-9]|[一二兩三四五六七八九])?",
+        text,
+    )
+    if m:
+        pre = _cn_num(m.group(1))
+        if pre is not None:
+            val = pre * 10000
+            post = _cn_num(m.group(2)) if m.group(2) else None
+            if post is not None:
+                val += post * 1000  # 『X萬Y』的 Y 代表千位
+            return int(val)
+
+    # 2) 阿拉伯數字:需有預算語境(預算/$/花/約 在前,或 元/塊/k 在後),或整句就是一個數字;
+    #    且數字不可黏在英數/連字號型號上(排除 i5-12400F / RTX5070 / B650 / DDR5)。
+    whole_number = bool(re.fullmatch(r"\s*[0-9][0-9,]{2,}\s*", text))
+    for mm in re.finditer(r"(?<![A-Za-z0-9\-/])([0-9][0-9,]{2,})(?![0-9A-Za-z])", text):
+        n = int(mm.group(1).replace(",", ""))
+        if n < 3000:
+            continue
+        start, end = mm.span(1)
+        before = text[max(0, start - 4):start]
+        after = text[end:end + 3].lstrip()
+        cue = (
+            "預算" in before or "$" in before or "花" in before or "約" in before
+            or after.startswith(("元", "塊"))
+            or after[:1].lower() == "k"
+            or whole_number
+        )
+        if cue:
+            return n
+    return None
+
+
+def _detect_use_case_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    t = text.lower()
+    if any(k in text for k in ("文書", "辦公", "office")):
+        return "office"
+    if "4k" in t or "2160" in t:
+        return "4k_gaming"
+    if any(k in text for k in ("遊戲", "電競")) or "gaming" in t or "1080" in t or "1440" in t or "2k" in t:
+        return "gaming"
+    return None
+
+
+def is_interactive_intent_text(text: str | None) -> bool:
+    """是否為互動式逐步選件意圖(用於 fresh 對話的分類)。"""
+    if not text:
+        return False
+    t = text.lower()
+    if any(k in text for k in _BUILD_INTENT):
+        return True
+    if any(k in t for k in ("從cpu", "從 cpu", "自己挑", "自己選", "挑零件", "選零件", "逐步", "一個一個")):
+        return True
+    if any(k in text for k in ("候選", "選項", "幾個", "幾款")):
+        return True
+    if _parse_choice_index(text) is not None:
+        return True
+    if any(k in text for k in ("下一步", "接下來")):
+        return True
+    if detect_reselect_category(text) or is_confirm_save_text(text):
+        return True
+    if _detect_brand_from_text(text) and any(k in t for k in ("cpu", "處理器", "組", "遊戲", "文書")):
+        return True
+    return False
+
+
+def is_selection_like_input(text: str | None) -> bool:
+    """是否為『選件動作』輸入:純數字 / 第 N 個 / 無 / 確認保存 / 重新選 X。
+
+    這類輸入只有在『已有 active selection flow』時才有意義;fresh session 不應拿它開始流程。
+    """
+    if not text:
+        return False
+    if _parse_choice_index(text) is not None:
+        return True
+    if _is_none_intent(text):
+        return True
+    if is_confirm_save_text(text):
+        return True
+    if detect_reselect_category(text):
+        return True
+    return False
+
+
+def has_active_selection_state(state: dict | None) -> bool:
+    """是否已有正在進行(或已完成)的互動式選件狀態。"""
+    if not state:
+        return False
+    return bool(
+        state.get("current_target_category")
+        or state.get("last_component_options")
+        or state.get("selected_components")
+        or state.get("selection_flow_complete")
+    )
+
+
+def is_budget_only_input(text: str | None) -> bool:
+    """是否為『只給預算』的裸句(如「我預算 30000」「預算 3 萬」「30000 元」)。
+
+    需含可解析的預算,且**不**含用途 / 組機·選件意圖 / 價格優惠查詢 / 明確品類·型號查詢。
+    這類輸入應進互動式 guard 詢問用途,而非走一般 LLM 商品查詢。
+    """
+    if not text:
+        return False
+    if _extract_budget_from_text(text) is None:
+        return False
+    low = text.lower()
+    if any(k in low for k in _PRICE_QUERY):
+        return False
+    if _detect_use_case_from_text(text) is not None:
+        return False
+    if is_interactive_intent_text(text) or is_selection_like_input(text):
+        return False
+    # 明確品類 / 型號 / 找查推薦 → 視為商品查詢,不算 budget-only
+    if any(k in low for k in (
+            "找", "查", "推薦", "gpu", "cpu", "顯卡", "顯示卡", "主機板", "記憶體", "ram",
+            "ssd", "硬碟", "儲存", "電源", "機殼", "散熱", "rtx", "rx", "arc", "ryzen",
+            "ultra", "i5", "i7", "i9", "r5", "r7", "r9")):
+        return False
+    return True
+
+
+def _start_intent_hint() -> str:
+    """fresh session 提示:請先提供預算與用途。"""
+    return (
+        "請先告訴我你的預算與用途,例如:\n"
+        "「我預算 30000,要組遊戲機,但我想自己挑零件,請從 CPU 開始。」\n"
+        "或\n"
+        "「我預算 20000,要組中低階文書機,請從 CPU 開始。」"
+    )
+
+
+def classify_ecommerce_mode(text: str | None, has_active_flow: bool) -> str:
+    """回 'full_menu' / 'interactive' / 'llm':決定 ecommerce node 該走哪條路。"""
+    if is_explicit_full_menu_text(text):
+        return "full_menu"
+    price_q = bool(text) and any(k in text.lower() for k in _PRICE_QUERY)
+    if has_active_flow:
+        selectiony = (
+            _parse_choice_index(text) is not None or _is_none_intent(text)
+            or detect_reselect_category(text) or is_confirm_save_text(text)
+            or (text and any(k in text for k in ("下一步", "接下來", "候選", "選項")))
+        )
+        if selectiony:
+            return "interactive"
+        if price_q:
+            return "llm"
+        return "interactive"
+    # fresh:選件動作(裸 1 / 我選第 N 個 / 無 / 確認)、只給預算的裸句也走 interactive,
+    # 由引擎 guard 友善詢問缺少資訊,不走一般 LLM 商品查詢。
+    if is_selection_like_input(text) or is_budget_only_input(text):
+        return "interactive"
+    if is_interactive_intent_text(text) and not price_q:
+        return "interactive"
+    return "llm"
+
+
+# ---- 渲染(deterministic 文字) ----
+def _sc_total(sc: dict) -> int:
+    return sum(int(c.get("price") or 0) for c in sc.values())
+
+
+def _render_running_list(sc: dict, budget: int | None) -> tuple[int, str]:
+    lines = ["目前已選零件:"]
+    if not sc:
+        lines.append("- (尚未選擇任何零件)")
+    total = 0
+    for cat in COMPONENT_SELECTION_ORDER:
+        if cat in sc:
+            c = sc[cat]
+            p = int(c.get("price") or 0)
+            total += p
+            lines.append(f"- {_CATEGORY_LABEL_ZH.get(cat, cat)}:{c.get('product_name')},{p:,} 元")
+    lines.append(f"\n目前總額:{total:,} 元")
+    if budget:
+        lines.append(f"剩餘預算:{int(budget) - total:,} 元")
+    return total, "\n".join(lines)
+
+
+def _render_options_block(category: str, options: list, warnings: list | None = None) -> str:
+    zh = _CATEGORY_LABEL_ZH.get(category, category)
+    lines = [f"{zh}候選:"]
+    for i, o in enumerate(options, 1):
+        bits = []
+        plat = o.get("platform") or o.get("socket")
+        if plat:
+            bits.append(plat)
+        if o.get("memory_generation"):
+            bits.append(o["memory_generation"])
+        meta = (" - " + " / ".join(bits)) if bits else ""
+        lines.append(f"{i}. {o.get('product_name')} - {int(o.get('price') or 0):,} 元{meta}")
+        if o.get("reason"):
+            lines.append(f"   推薦理由:{o['reason']}")
+        if o.get("compatibility_notes"):
+            lines.append(f"   相容性:{o['compatibility_notes']}")
+    for w in (warnings or []):
+        lines.append(f"⚠️ {w}")
+    lines.append("\n請回覆要選第幾個(例如「我選第 1 個」);散熱器/顯示卡若不需要可回「無」。")
+    return "\n".join(lines)
+
+
+def _render_complete_menu(sc: dict, budget: int | None) -> str:
+    total, listtxt = _render_running_list(sc, budget)
+    lines = ["完整菜單:"]
+    for cat in COMPONENT_SELECTION_ORDER:
+        if cat in sc:
+            c = sc[cat]
+            lines.append(f"- {_CATEGORY_LABEL_ZH.get(cat, cat)}:{c.get('product_name')},{int(c.get('price') or 0):,} 元")
+    lines.append(f"\n總價:{total:,} 元")
+    if budget:
+        diff = int(budget) - total
+        lines.append(f"預算:{int(budget):,} 元")
+        lines.append(f"差額:{diff:,} 元" + ("(超出預算!)" if diff < 0 else ""))
+        if diff < 0:
+            lines.append("⚠️ 總價已超出預算,建議重新選較便宜的零件。")
+        elif budget and diff > int(budget) * 0.3:
+            lines.append("提示:離預算還很多,可考慮升級 GPU / CPU / Storage。")
+    lines.append(
+        "\n你可以:\n1. 確認此菜單  2. 重新選 CPU  3. 重新選顯示卡  4. 重新選主機板  "
+        "5. 重新選記憶體  6. 重新選硬碟/儲存  7. 重新選電源  8. 重新選散熱器  9. 重新選機殼\n"
+        "(說「確認此菜單 / 保存 / 存成 JSON」即可存檔)")
+    return "\n".join(lines)
+
+
+def _reselect_dependency_notice(category: str) -> str:
+    return {
+        "CPU": "提醒:重新選 CPU 後,主機板 / 記憶體 / 散熱器 / 顯示卡可能需要一併重選以維持相容。",
+        "Motherboard": "提醒:重新選主機板後,記憶體(DDR4/DDR5)可能需要重選。",
+        "GPU": "提醒:重新選顯示卡後,電源供應器(瓦數)可能需要重選。",
+        "Cooler": "提醒:重新選散熱器後,請確認機殼空間與散熱器高度 / 水冷排是否相容。",
+    }.get(category, "")
+
+
+def _write_build_json(payload: dict, output_dir: str) -> str:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = re.sub(r"[^0-9]", "", payload.get("created_at", ""))[:14] or "build"
+    base = f"pc_build_{stamp}"
+    path = out_dir / f"{base}.json"
+    n = 2
+    while path.exists():
+        path = out_dir / f"{base}_{n}.json"
+        n += 1
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def save_selected_components(
+    selected_components: dict,
+    *,
+    budget: int | None,
+    use_case: str,
+    created_at: str,
+    output_dir: str = _DEFAULT_BUILD_OUTPUT_DIR,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """直接由 state.selected_components(已含完整規格)寫 JSON,不重新向 LLM 要商品名。"""
+    components = [selected_components[c] for c in COMPONENT_SELECTION_ORDER if c in selected_components]
+    total = sum(int(c.get("price") or 0) for c in components)
+    remaining = (int(budget) - total) if budget else None
+    # 相容性摘要 / warnings:用已選名稱跑一次 validate(名稱來自 DB / 虛擬,皆可解析)
+    names = {_ARG_KEY[c]: selected_components[c]["product_name"]
+             for c in selected_components if c in _ARG_KEY}
+    v = validate_selected_build(use_case=use_case, budget=budget, db_path=db_path, **names)
+    warnings = list(v["warnings"]) + ([] if v["is_valid"] else v["issues"])
+    payload = {
+        "created_at": created_at,
+        "budget": int(budget) if budget else None,
+        "use_case": _classify_use_case(use_case),
+        "total_price": total,
+        "remaining_budget": remaining,
+        "components": components,
+        "compatibility_summary": v["compatibility_summary"],
+        "warnings": warnings,
+        "missing_categories": v["missing_categories"],
+    }
+    path = _write_build_json(payload, output_dir)
+    return {"ok": True, "output_path": path, "total_price": total,
+            "component_count": len(components), "warnings": warnings}
+
+
+# 完整菜單操作選單:索引 -> 動作(對應 _render_complete_menu 的『1.確認…9.重新選機殼』)
+_MENU_ACTION_INDEX = {
+    1: "confirm", 2: "CPU", 3: "GPU", 4: "Motherboard", 5: "RAM",
+    6: "Storage", 7: "PSU", 8: "Cooler", 9: "Case",
+}
+
+
+def parse_completed_menu_action(user_text: str | None) -> tuple | None:
+    """完整菜單(selection_flow_complete)時把輸入解析成 ('confirm', None) 或 ('reselect', category)。
+
+    **只在完整菜單畫面時**呼叫:此時純數字 1~9 代表操作選單(1=確認此菜單;2~9=重新選對應類別);
+    也接受文字『確認 / 重新選 X / 換 X / X 太貴』。解析不出回 None。
+    一般候選階段(尚未完成)**不**走此函式,純數字仍代表候選第 N 個。
+    """
+    if not user_text:
+        return None
+    if is_confirm_save_text(user_text):
+        return ("confirm", None)
+    rc = detect_reselect_category(user_text)
+    if rc:
+        return ("reselect", rc)
+    idx = _parse_choice_index(user_text)
+    if idx in _MENU_ACTION_INDEX:
+        a = _MENU_ACTION_INDEX[idx]
+        return ("confirm", None) if a == "confirm" else ("reselect", a)
+    return None
+
+
+def _reselect_remove_dependents(sc: dict, category: str) -> tuple[list[str], list[str]]:
+    """重新選某類時,deterministic 移除受影響(相依)的下游已選零件;回傳 (removed, warnings)。
+
+    CPU→GPU 的條件移除(新 CPU 無內顯且 GPU 為虛擬『無』)在選到新 CPU 時另外處理,不在此。
+    """
+    removed: list[str] = []
+    warns: list[str] = []
+    if category == "CPU":
+        for c in ("Motherboard", "RAM", "Cooler"):
+            if c in sc:
+                del sc[c]
+                removed.append(c)
+    elif category == "Motherboard":
+        if "RAM" in sc:
+            del sc["RAM"]
+            removed.append("RAM")
+        if "Cooler" in sc:
+            warns.append("重選主機板:請確認散熱器扣具是否仍相容(未自動移除)。")
+    elif category == "GPU":
+        if "PSU" in sc:
+            del sc["PSU"]
+            removed.append("PSU")
+        if "Case" in sc:
+            warns.append("重選顯示卡:請確認機殼可容納新顯卡長度(未自動移除)。")
+    elif category == "Cooler":
+        if "Case" in sc:
+            warns.append("重選散熱器:請確認機殼可容納散熱器高度 / AIO 水冷排(未自動移除)。")
+    elif category == "Case":
+        warns.append("重選機殼:請確認 GPU 長度 / 散熱器高度仍相容。")
+    return removed, warns
+
+
+def run_interactive_selection(
+    state: dict, *, created_at: str, db_path: str = DEFAULT_DB_PATH,
+    output_dir: str = _DEFAULT_BUILD_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """State-driven 互動式選件引擎。回傳 graph state 更新(含 final_answer / interactive_response)。
+
+    created_at:由呼叫端(node)以當下時間帶入(用於保存 JSON 檔名/內容)。
+    """
+    sc = dict(state.get("selected_components") or {})
+    budget = state.get("selected_budget")
+    use_case = state.get("selected_use_case")
+    last_opts = list(state.get("last_component_options") or [])
+    cur = state.get("current_target_category")
+    text = state.get("request", "") or ""
+
+    b = _extract_budget_from_text(text)
+    if b:
+        budget = b
+    uc = _detect_use_case_from_text(text)
+    if uc:
+        use_case = uc
+    # 注意:此時**不要**預設 use_case=gaming;fresh-session guard 需要知道使用者是否真的給了用途。
+
+    active = has_active_selection_state(state)
+
+    # ---- fresh-session guard:沒有 active flow 時,不可用裸選件動作 / 不足資訊開始 gaming ----
+    def _ask(msg: str) -> dict:
+        # 友善提示:不推薦、不預設 gaming、不更新 selected_components、不保存。
+        # 僅保留(若使用者明確給了)budget / use_case 供下一輪續用。
+        out = {"final_answer": msg, "ecommerce_advice": msg, "interactive_response": True}
+        if budget:
+            out["selected_budget"] = budget
+        if use_case:
+            out["selected_use_case"] = use_case
+        return out
+
+    if not active:
+        if is_selection_like_input(text):
+            if _is_none_intent(text):
+                msg = ("目前沒有正在進行的選件流程,也沒有候選可以選"
+                       "(『無』請在散熱器 / 顯示卡的選擇階段使用)。\n\n" + _start_intent_hint())
+            elif is_confirm_save_text(text):
+                msg = ("目前尚未開始或尚未完成選件流程,無法確認 / 保存。\n\n" + _start_intent_hint())
+            else:  # 純數字 / 我選第 N 個 / 重新選 X
+                msg = ("目前還沒有正在進行的選件流程,也沒有上一輪候選可以選。\n\n" + _start_intent_hint())
+            return _ask(msg)
+        # 非選件動作:視為起手意圖,但需 budget + use_case 才能開始(不預設 gaming)
+        if not budget or not use_case:
+            if not budget and not use_case:
+                msg = _start_intent_hint()
+            elif not use_case:
+                msg = (f"收到預算 {int(budget):,} 元。請再告訴我用途(遊戲 / 文書 / 4K 遊戲 / 剪輯),例如:\n"
+                       f"「我預算 {int(budget):,},要組遊戲機,請從 CPU 開始。」")
+            else:
+                zh_uc = {"gaming": "遊戲機", "4k_gaming": "4K 遊戲機", "office": "文書機"}.get(use_case, "電腦")
+                msg = (f"收到用途。請再告訴我預算,例如:\n"
+                       f"「我預算 30000,要組{zh_uc},請從 CPU 開始。」")
+            return _ask(msg)
+
+    if not use_case:
+        use_case = "gaming"
+
+    def options_for(category: str) -> dict:
+        names = {_ARG_KEY[c]: sc[c]["product_name"] for c in sc if c in _ARG_KEY}
+        total = _sc_total(sc)
+        rb = (int(budget) - total) if budget else None
+        prefer = _detect_brand_from_text(text) if category == "CPU" else None
+        return recommend_component_options(
+            target_category=category, budget=budget, use_case=use_case,
+            remaining_budget=rb, prefer_platform=prefer, db_path=db_path, **names)
+
+    def _finish(msg: str, **extra) -> dict:
+        out = {"selected_budget": budget, "selected_use_case": use_case,
+               "selected_components": sc, "final_answer": msg, "ecommerce_advice": msg,
+               "interactive_response": True}
+        out.update(extra)
+        return out
+
+    def _do_reselect(cat: str) -> dict:
+        """進入『重新選 cat』:移除相依下游零件 + cat 本身,推薦 cat 候選。"""
+        removed, warns = _reselect_remove_dependents(sc, cat)
+        sc.pop(cat, None)  # 移除該類本身,待重新選
+        res = options_for(cat)
+        opts = res["options"]
+        _, listtxt = _render_running_list(sc, budget)
+        parts = [f"你正在重新選 {_CATEGORY_LABEL_ZH.get(cat, cat)}。"]
+        if removed:
+            parts.append("因相容性可能改變,以下相依零件已自動移除需重新選:"
+                         + "、".join(_CATEGORY_LABEL_ZH.get(c, c) for c in removed))
+        for w in warns:
+            parts.append("⚠️ " + w)
+        parts.append(listtxt)
+        parts.append(_render_options_block(cat, opts, res.get("warnings")))
+        return _finish("\n\n".join(p for p in parts if p),
+                       current_target_category=cat, last_component_options=opts,
+                       pending_reselect_category=cat, selection_flow_complete=False)
+
+    # 是否已選完所有類別(完整菜單畫面);以 selected_components 為唯一權威依據
+    completed = bool(sc) and get_next_component_category(sc, use_case) is None
+
+    # 0) 完整菜單操作介面:1~9 / 確認 / 重新選 X(deterministic,不靠 LLM)
+    if completed:
+        action = parse_completed_menu_action(text)
+        if action is None:
+            menu = _render_complete_menu(sc, budget)
+            return _finish(menu + "\n\n(請輸入 1~9,或說「確認此菜單 / 重新選 CPU」等。)",
+                           selection_flow_complete=True, current_target_category=None,
+                           last_component_options=[], pending_reselect_category=None)
+        if action[0] == "confirm":
+            # 策略:在完整菜單按「1 / 確認此菜單 / 保存」即視為確認並直接保存 JSON。
+            saveres = save_selected_components(
+                sc, budget=budget, use_case=use_case, created_at=created_at,
+                output_dir=output_dir, db_path=db_path)
+            menu = _render_complete_menu(sc, budget)
+            return _finish(menu + f"\n\n已確認並保存最終菜單。\nJSON 路徑:{saveres['output_path']}",
+                           selection_flow_complete=True, current_target_category=None,
+                           last_component_options=[], pending_reselect_category=None)
+        return _do_reselect(action[1])
+
+    # 1) 確認 / 保存(尚未選完 → 提醒還缺哪些)
+    if is_confirm_save_text(text):
+        _, listtxt = _render_running_list(sc, budget)
+        missing = [c for c in COMPONENT_SELECTION_ORDER if c not in sc]
+        zh_missing = "、".join(_CATEGORY_LABEL_ZH.get(c, c) for c in missing)
+        return _finish(listtxt + f"\n\n尚未選完(還缺:{zh_missing}),請先選完所有零件再確認保存。")
+
+    # 2) 重新選某類(文字觸發『重新選 X / 換 X / X 太貴』;含相依零件自動移除)
+    rc = detect_reselect_category(text)
+    if rc:
+        return _do_reselect(rc)
+
+    # 3) 從 last_options 解析『第 N 個 / 無』
+    sel = resolve_selection_from_last_options(text, last_opts, cur) if (last_opts and cur) else None
+    if sel is not None:
+        sc[cur] = _option_to_selected(sel, cur)
+        was_reselect = (state.get("pending_reselect_category") == cur)
+        header: list[str] = []
+        if was_reselect:
+            header.append(
+                f"已重新選擇 {_CATEGORY_LABEL_ZH.get(cur, cur)}:"
+                f"{sc[cur].get('product_name')},{int(sc[cur].get('price') or 0):,} 元")
+            # CPU 重選後條件移除:新 CPU 無內顯且 GPU 為虛擬『無』 → 移除 GPU 需重選
+            if cur == "CPU":
+                gpu = sc.get("GPU")
+                if gpu and gpu.get("is_virtual") and not _cpu_has_igpu(
+                        {"product_name": sc["CPU"].get("product_name")}):
+                    del sc["GPU"]
+                    header.append("新 CPU 無內顯,已移除『無獨立顯示卡』,需重新選顯示卡。")
+        nxt = get_next_component_category(sc, use_case)
+        if nxt is None:
+            menu = _render_complete_menu(sc, budget)
+            return _finish("\n\n".join(header + [menu]) if header else menu,
+                           current_target_category=None, last_component_options=[],
+                           pending_reselect_category=None, selection_flow_complete=True)
+        res = options_for(nxt)
+        opts = res["options"]
+        _, listtxt = _render_running_list(sc, budget)
+        body = _render_options_block(nxt, opts, res.get("warnings"))
+        nxt_line = f"下一步:推薦 {_CATEGORY_LABEL_ZH.get(nxt, nxt)} 候選"
+        return _finish("\n\n".join(header + [listtxt, nxt_line, body]),
+                       current_target_category=nxt, last_component_options=opts,
+                       pending_reselect_category=None, selection_flow_complete=False)
+
+    # 3b) 看起來想選但解析不出 → 請使用者明確編號(不猜)
+    if last_opts and cur and _parse_choice_index(text) is None and _is_none_intent(text) is False \
+            and any(k in text for k in ("選", "第", "要")):
+        body = _render_options_block(cur, last_opts)
+        return _finish("我不確定你要選哪一個,請明確回覆編號(例如「我選第 1 個」)。\n\n" + body,
+                       current_target_category=cur, last_component_options=last_opts)
+
+    # 4) 起手 / 推薦下一類
+    nxt = get_next_component_category(sc, use_case)
+    if nxt is None:
+        return _finish(_render_complete_menu(sc, budget), selection_flow_complete=True,
+                       current_target_category=None, last_component_options=[])
+    res = options_for(nxt)
+    opts = res["options"]
+    body = _render_options_block(nxt, opts, res.get("warnings"))
+    if sc:
+        _, listtxt = _render_running_list(sc, budget)
+        msg = "\n\n".join([listtxt, f"下一步:推薦 {_CATEGORY_LABEL_ZH.get(nxt, nxt)} 候選", body])
+    else:
+        intro = (f"以下是預算 {int(budget):,} 元 " if budget else "以下是 ") + \
+                f"{_classify_use_case(use_case)} 起手可選的 {_CATEGORY_LABEL_ZH.get(nxt, nxt)} 候選:"
+        msg = intro + "\n\n" + body
+    return _finish(msg, current_target_category=nxt, last_component_options=opts,
+                   selection_flow_complete=False, pending_reselect_category=None)
+
+
+def is_interactive_selection_request(text: str | None) -> bool:
+    """供 router 用的 deterministic 判斷:此 utterance 是否為互動式逐步選件動作。
+
+    為 True 時 router 應**直接導向 ecommerce**(不經 LLM,避免選件中途被誤路由)。
+    明確要求完整菜單(full_menu)不算(交給一般 ecommerce/LLM 路徑處理完整菜單)。
+    """
+    if not text:
+        return False
+    if is_explicit_full_menu_text(text):
+        return False
+    # 選件動作(數字 / 第 N 個 / 無 / 確認保存 / 重新選 X)、只給預算的裸句一律導向 ecommerce;
+    # fresh session 由引擎 guard 友善提示,不會誤開 gaming 流程。
+    if is_selection_like_input(text) or is_budget_only_input(text):
+        return True
+    return is_interactive_intent_text(text)

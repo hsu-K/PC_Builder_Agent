@@ -102,15 +102,47 @@ def _build_integrator_system_prompt() -> str:
         "- 若無法確認完整相容性,必須明說:『以下是商城候選,不是完整相容菜單』。\n"
         "- 若要提出組合建議,平台(CPU/主機板/RAM 的腳位與記憶體世代)必須一致;"
         "無法確認時就不要輸出成單一完整配置。\n"
+        "互動式『候選 options 模式』(非常重要,當 ecommerce 區塊是逐步選件候選清單時):\n"
+        "- 若 ecommerce_advice 是『某一類別的 2~3 個候選』(來自 recommend_component_options_tool,"
+        "通常含 category / options / constraints_applied / warnings / next_step_suggestion),"
+        "**不要**把它改寫成一套唯一的完整菜單,也不要硬補其他類別的商品。\n"
+        "- **絕不可**把 2~3 個 CPU(或任一類)候選擴展成一整套 8 類菜單;這一輪就只呈現『這一類』的候選,"
+        "並在最後**明確問使用者要選哪一個**,或提示下一步要選哪一類。只有使用者**明確要求完整菜單**且 "
+        "ecommerce 區塊確實回傳了完整 build 時,才用完整菜單格式。\n"
+        "- **若 ecommerce 區塊已是 CPU(或任一類)候選清單,絕不可改寫成追問**:不可把候選清單換成"
+        "『請先告訴我 AMD 還是 Intel』『請提供 CPU 型號』『請問你的品牌偏好』等反問。候選已經存在,就**直接列出**"
+        "每個候選的 product_name / price / socket / platform / memory_generation / 推薦理由,結尾請使用者"
+        "**選 1 / 2 / 3**(並說明接著會依所選 CPU 推薦相容主機板)。\n"
+        "- 必須**逐一保留**每個候選的 product_name、price、source、platform/socket/記憶體世代、"
+        "推薦原因(reason)與相容性說明(compatibility_notes);保留 constraints_applied 與 warnings。\n"
+        "- **嚴格遵守工具給的相容性結論,不可推翻**:工具說『DDR4 主機板 → RAM 只能 DDR4』時,"
+        "你**不可**改成 DDR5 或補上 DDR5 候選;工具鎖 AM5 時不可列 A520/B550;鎖 Intel 時不可列 AMD。\n"
+        "- 如實轉達 warnings(例如:無內顯 CPU 需搭獨顯、LGA1700 記憶體世代待主機板版本確認、候選不足)。\n"
+        "- 最後用工具的 next_step_suggestion 提醒使用者『下一步建議挑選哪一類零件』。\n"
+        "- 若 ecommerce_advice 是 validate / summarize 結果(含 is_valid / issues / total_price / "
+        "remaining_budget / missing_categories),要完整保留:目前已選清單、總價、剩餘預算、缺少類別、"
+        "相容性結論與 issues/warnings;不相容就明說不相容,不可粉飾成相容。\n"
+        "- **只能列工具實際回傳的候選/商品,絕不可編造 DB 沒有的商品、價格、型號或商城。**\n"
+        "- **互動式逐步選件的『目前進度』必須完整保留**:若 ecommerce 區塊開頭有『目前已選零件 / 目前總額 / "
+        "剩餘預算 / 下一步』,**原樣保留**(含 GPU=無 / Cooler=無 等 0 元虛擬選項,逐行列出價格)。\n"
+        "- **完整菜單完成畫面**:若 ecommerce 區塊已列出完整菜單與『1.確認此菜單 2.重新選 CPU…9.重新選機殼』操作選項,"
+        "**完整保留菜單各件與價格、總價/預算/差額,以及該操作選項清單**,不可刪減、不可改寫成單一推薦。\n"
+        "- **保存結果**:若 ecommerce 區塊回報已保存 JSON(含 output_path),**原樣保留**該路徑與『已保存最終菜單』訊息;"
+        "**不要**自行宣稱已保存或自行編路徑。\n"
+        "- **散熱器『無』選項**:Cooler 候選若含『無額外散熱器(price 0)』,要照樣列出,不可移除。\n"
         "The final output must be in Traditional Chinese (zh-TW), concise but specific. "
         "輸出結構依是否有 Ecommerce specialist 區塊而定:\n"
-        "(甲)有 ecommerce 區塊時,用這些標題:\n"
+        "(甲)有 ecommerce 區塊且為『完整菜單』時,用這些標題:\n"
         "  1. 相容性提醒(完整菜單問題必放:說明這是商城候選、平台是否一致、不可混搭)\n"
         "  2. 商城查詢結果 / 商城候選商品(只列 ecommerce 區塊實際出現的商品)\n"
         "  3. 一般選型建議(標註為非商城查詢結果;只給概念方向,不附編造的型號/價格/商城)\n"
         "  4. 建議下一步確認(請使用者確認平台/相容性後再下單)\n"
         "(乙)沒有 ecommerce 區塊(純 CPU/GPU 規格分析)時,**不要**有商城查詢結果段;用這些標題:\n"
         "  1. 規格分析  2. 適用情境  3. 建議下一步\n"
+        "(丙)互動式候選 options 模式時,用這些標題:\n"
+        "  1. {類別}候選(逐一列 2~3 個候選 + 價格/平台/相容性說明)\n"
+        "  2. 已套用的相容性限制(constraints_applied)與提醒(warnings)\n"
+        "  3. 下一步建議(沿用 next_step_suggestion;提示接著選哪一類)\n"
     )
 
 
@@ -149,6 +181,14 @@ def integrator_node(
     debug: bool = False,
 ) -> dict[str, Any]:
     """Integrator Node 的執行函數"""
+
+    # State-driven 互動式選件:ecommerce node 已產生 deterministic final_answer,
+    # integrator 直接沿用、不再經 LLM 改寫(避免改動候選/順序/虛擬選項或編造)。
+    if state.get("interactive_response") and (state.get("final_answer") or "").strip():
+        if debug:
+            print("Integrator Node: pass-through deterministic interactive final_answer")
+            print("===============================================================")
+        return {"final_answer": state["final_answer"]}
 
     model = build_model(model_name)
 

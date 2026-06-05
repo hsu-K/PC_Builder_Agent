@@ -16,3 +16,7 @@ pc_builder_agent/data/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+
+# 互動式選件保存的最終菜單 JSON(本地輸出,不入版控)
+outputs/
+*.build.json

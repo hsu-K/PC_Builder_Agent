@@ -64,6 +64,37 @@ ECOMMERCE_KEYWORDS = (
     "工作機", "菜單", "完整菜單", "電腦菜單",
 )
 
+# 互動式逐步選件意圖詞(由 recommend_component_options_tool 處理,屬 ecommerce)。
+# 刻意搭配「選件意圖」或「零組件+世代/平台」,避免只因泛用詞(如「推薦」)就誤導到 ecommerce。
+# 注意:文字會先 .lower(),故英文一律小寫;中文不受影響。
+INTERACTIVE_SELECTION_KEYWORDS = (
+    # 選件/候選意圖
+    "候選", "選項", "幾個", "幾款", "逐步", "一個一個", "先給我", "先看", "先選",
+    "下一步", "我選", "選第", "接下來",
+    # 自己挑零件 / CPU-first 起手意圖(預設互動式逐步選件)
+    "挑零件", "選零件", "自己挑", "自己選", "從cpu開始", "cpu開始", "從 cpu 開始",
+    # 重新選單項 / 確認保存意圖(完整菜單完成後的操作)
+    "重新選", "重選", "太貴", "換顯示卡", "換顯卡", "換cpu", "換主機板", "換記憶體",
+    "確認此菜單", "確認菜單", "確認這套", "就這套", "保存", "存成json", "存成 json",
+    "存檔", "存起來", "存成檔", "輸出json", "輸出 json",
+    # 「第 N 個 / 第 N 張」常見寫法(另有 _NTH_RE 處理任意 N 與空白)
+    "第1個", "第2個", "第3個", "第1張", "第2張", "第3張",
+    # 候選請求常見組合詞
+    "cpu候選", "主機板候選", "記憶體候選", "ram候選", "相容主機板", "相容記憶體",
+    "ddr4 主機板", "ddr5 主機板", "ddr4主機板", "ddr5主機板",
+    "ddr4 平台", "ddr5 平台", "ddr4平台", "ddr5平台",
+    # 換平台 / 記憶體世代意圖
+    "ddr4", "ddr5",
+)
+
+# 「第 N 個 / 第 N 張」(任意數字、可含空白)與「換 平台/世代」意圖,用 regex 補捉。
+_NTH_SELECT_RE = re.compile(r"第\s*\d+\s*[個张張顆隻支]")
+_SWITCH_PLATFORM_RE = re.compile(r"換\s*(am5|am4|intel|amd|ddr4|ddr5|lga1700|lga1851)")
+# 品牌選用意圖(組機/選件情境):『(想/要/用/選) AMD/Intel』或『AMD…Intel…都可以』。
+# 用於互動式 CPU-first 起手的品牌指定;純規格比較(無此措辭)不會命中。
+_BRAND_INTENT_RE = re.compile(
+    r"(想|要|用|選|指定)\s*(amd|intel)|(amd[^a-z]{0,6}intel|intel[^a-z]{0,6}amd)[^a-z]{0,4}都")
+
 
 def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     """判斷文字是否包含任一關鍵字"""
@@ -86,7 +117,13 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     ).lower()
 
     pc_board_match = _contains_keyword(combined_text, PC_BOARD_DISCUSSION_KEYWORDS)
-    ecommerce_match = _contains_keyword(combined_text, ECOMMERCE_KEYWORDS)
+    interactive_match = (
+        _contains_keyword(combined_text, INTERACTIVE_SELECTION_KEYWORDS)
+        or bool(_NTH_SELECT_RE.search(combined_text))
+        or bool(_SWITCH_PLATFORM_RE.search(combined_text))
+        or bool(_BRAND_INTENT_RE.search(combined_text))
+    )
+    ecommerce_match = _contains_keyword(combined_text, ECOMMERCE_KEYWORDS) or interactive_match
     cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
     gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS) or bool(_GPU_AI_RE.search(combined_text))
 
@@ -98,7 +135,10 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
         reason_parts.append("偵測到 PTT/社群/菜單討論詞")
     if ecommerce_match:
         targets.append("ecommerce")
-        reason_parts.append("偵測到商城/價格/優惠等商業意圖詞")
+        if interactive_match:
+            reason_parts.append("偵測到互動式逐步選件意圖(候選/選項/第N個/換平台/相容零件)")
+        else:
+            reason_parts.append("偵測到商城/價格/優惠等商業意圖詞")
     if gpu_match:
         targets.append("gpu_specialist")
         reason_parts.append("偵測到顯卡/遊戲/圖形需求")
@@ -124,9 +164,19 @@ def _route_targets_for_request(
     model_name: str | None = None,
 ) -> tuple[list[str], str]:
     """使用 LLM 的語意理解決定要啟動哪些 subAgent"""
-    
+
     request = state.get("request", "")
     plan = state.get("plan", "")
+
+    # Deterministic 前置路由(互動式逐步選件):選件動作(第 N 個 / 無 / 重新選 / 確認保存 /
+    # 從 CPU 開始 / 候選 等)一律直接導向 ecommerce,不經 LLM,避免選件中途被誤路由到 specialist
+    # 而漏掉 state 更新(Phase Interactive-State-Driven-Fix)。
+    try:
+        from pc_builder_agent.tools.ecommerce_db import is_interactive_selection_request
+        if is_interactive_selection_request(request):
+            return ["ecommerce"], "偵測到互動式逐步選件動作,deterministic 直接導向 ecommerce"
+    except Exception:
+        pass
 
     system_prompt = (
         "You are the PC Builder Router. "
@@ -136,8 +186,27 @@ def _route_targets_for_request(
         "- gpu_specialist: GPU 選型、遊戲/AI/繪圖用途、顯卡效能與相容性建議。\n"
         "- pc_board_scraper: PTT / 社群菜單討論、近期菜單分享、網友配單與文章查詢。\n"
         "- ecommerce: 電子商城商品、價格、優惠、特價、比價、庫存,"
-        "以及原價屋/欣亞/PChome/momo 等商城查詢。\n"
+        "以及原價屋/欣亞/PChome/momo 等商城查詢;**並且**負責『互動式逐步零組件候選推薦』"
+        "(針對某一類零件給 2~3 個資料庫實品候選,並做相容性過濾)。\n"
         "Selection guidance:\n"
+        "INTERACTIVE COMPONENT SELECTION(互動式逐步選件 — 非常重要):\n"
+        "- ecommerce 不只負責價格/優惠/完整菜單;它也負責『互動式逐步零組件候選推薦』"
+        "(由 recommend_component_options_tool 提供 DB 實品候選 + 相容性過濾)。\n"
+        "- 當使用者要求『候選 / 選項 / 幾個選擇 / 第 N 個 / 逐步選 / 一個一個選 / 先看某一類零件 / "
+        "先選 CPU / 下一步選主機板 / 換 AM5 / 換 Intel / 指定 DDR4 或 DDR5 主機板 / 相容主機板 / "
+        "相容記憶體』時,**必須包含 ecommerce**(例:『給我 CPU 候選』『給我幾張主機板選擇』"
+        "『我選第 2 個,接下來給我主機板』『我想用 AM5 平台,先給我 CPU 候選』"
+        "『我想用 LGA1700 DDR5 主機板,給我 RAM 候選』)。\n"
+        "- **預設組機=互動式逐步選件**:使用者給預算想『組電腦 / 遊戲機 / 文書機 / 主機 / 組一台』"
+        "(例:『我預算 30000 要組遊戲機』『我想自己挑零件』『幫我從 CPU 開始推薦』),**必須包含 "
+        "ecommerce**(由它走 CPU-first 逐步選件)。指定品牌(『我想用 AMD』『我想用 Intel』"
+        "『AMD、Intel 都可以』)同樣**必須包含 ecommerce**。這些都**不可只到 cpu_specialist / "
+        "gpu_specialist**(可併選 specialist,但一定要有 ecommerce)。\n"
+        "- 這類『逐步選某類零件』的請求,即使提到 CPU / 主機板 / 記憶體,也**不可只選 cpu_specialist**;"
+        "若同時涉及 CPU 技術分析可選 ecommerce + cpu_specialist,但**不可只到 cpu_specialist**;"
+        "若涉及 GPU 遊戲效能可選 ecommerce + gpu_specialist,但**不可只到 gpu_specialist**。\n"
+        "- 例外:**純規格比較**(沒有要選購/候選/逐步選的意圖),例如『RTX 5070 vs 5060 Ti 玩 2K 哪個好』、"
+        "『i5-14600K 和 R5 7600 哪顆強』,仍可只選 gpu_specialist / cpu_specialist,不需 ecommerce。\n"
         "- If the user wants real store products, prices, deals/discounts, stock, "
         "or price comparison, choose ecommerce. This includes CPU coolers — "
         "散熱器 / CPU 散熱器 / 水冷 / 空冷 / 塔扇 / AIO 都是 ecommerce 可查的商品類別。\n"
@@ -167,6 +236,14 @@ def _route_targets_for_request(
         "- Example: 「30000 元遊戲機菜單，也幫我看有沒有商城優惠」 should map to "
         '["gpu_specialist", "ecommerce"] (cpu_specialist is also acceptable), '
         "NOT pc_board_scraper.\n"
+        "- Example: 「請先給我 2~3 個 CPU 候選」 -> must include ecommerce, e.g. "
+        '["ecommerce"] or ["ecommerce", "cpu_specialist"]; NOT only cpu_specialist.\n'
+        "- Example: 「我選第 2 個 CPU，接下來給我相容主機板候選」 -> include ecommerce.\n"
+        "- Example: 「我想用 DDR4 平台，先給我 2~3 張 DDR4 主機板候選」 -> include ecommerce.\n"
+        "- Example: 「我想用 AM5 平台，先給我 CPU 候選」 / 「我想用 Intel 平台，先給我 CPU 候選」 "
+        "-> include ecommerce (cpu_specialist optional, but not alone).\n"
+        "- Counter-example: 「RTX 5070 和 RTX 5060 Ti 玩 2K 哪個比較適合」 -> only "
+        '["gpu_specialist"] (pure spec comparison, NOT ecommerce).\n'
         "Return JSON only, in this format: "
         '{"targets": ["cpu_specialist"], "reason": "..."}. '
         "The targets field must be a non-empty subset of "
