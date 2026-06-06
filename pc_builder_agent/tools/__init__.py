@@ -33,6 +33,7 @@ from pc_builder_agent.tools.ecommerce_tools import (
 ALL_TOOLS = [
     *MEMORY_TOOLS,
     estimate_psu_wattage,
+    search_component_web,
     web_scrape,
     pc_board_scraper,
     search_ecommerce_products,

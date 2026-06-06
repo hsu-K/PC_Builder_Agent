@@ -31,8 +31,10 @@ CPU_KEYWORDS = (
 )
 
 GPU_KEYWORDS = (
-    "gpu", "顯卡", "顯示卡", "遊戲", "1440p", "4k",
+    "gpu", "顯卡", "顯示卡", "遊戲", "1440p", "4k", "2k", "1080p",
     "光追", "fps", "剪輯", "繪圖", "渲染",
+    # 常見顯卡品牌/系列詞:讓「RTX 5070 vs 5060 Ti」這類純顯卡比較能命中 gpu_specialist
+    "rtx", "gtx", "radeon", "geforce",
 )
 # 「AI」單獨成詞才算 GPU 意圖(避免裸子字串 "ai" 誤中 "aio"/"fail" 等);
 # 前後不接英文字母,故 "aio" 不中、"AI繪圖"/"玩 AI" 仍中。
@@ -56,6 +58,14 @@ COOLING_KEYWORDS = (
 PC_BOARD_KEYWORDS = (
     "文章", "菜單", "推薦", "ptt", "分享", "討論", "社群",
     "之前", "爬取", "查看", "看看", "告訴我", "有什麼", "介紹",
+)
+
+# 明確的「文章來源」關鍵字(PTT / 電蝦 / 網友 / 文章 / 社群討論 / PC_Board)。
+# 刻意**不含**「菜單 / 推薦 / 有什麼」等泛用詞,避免一般組機需求被誤導到 pc_board_scraper;
+# 僅在使用者明確點名文章來源時,才優先去查 PC_Board 文章。
+ARTICLE_SOURCE_KEYWORDS = (
+    "ptt", "批踢踢", "電蝦", "網友", "文章", "社群討論", "鄉民",
+    "pc_board", "pc board", "板上", "版上",
 )
 
 
@@ -261,6 +271,15 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     storage_match = _contains_keyword(combined_text, STORAGE_KEYWORDS)
     cooling_match = _contains_keyword(combined_text, COOLING_KEYWORDS)
 
+    # 互動式逐步選件意圖(關鍵字 / 第 N 個 / 換平台 / 品牌意圖)與商城商業意圖。
+    interactive_match = (
+        _contains_keyword(combined_text, INTERACTIVE_SELECTION_KEYWORDS)
+        or bool(_NTH_SELECT_RE.search(combined_text))
+        or bool(_SWITCH_PLATFORM_RE.search(combined_text))
+        or bool(_BRAND_INTENT_RE.search(combined_text))
+    )
+    ecommerce_match = _contains_keyword(combined_text, ECOMMERCE_KEYWORDS) or interactive_match
+
     component_targets: list[str] = []
     if memory_match:
         component_targets.append("memory_specialist")
@@ -313,13 +332,24 @@ def _route_targets_for_request(
     request = state.get("request", "")
     plan = state.get("plan", "")
 
+    # 0. 明確文章來源優先：若使用者明確點名 PTT/電蝦/網友/文章/社群討論/PC_Board,
+    #    且尚未取得文章回應,先去查 PC_Board 文章(必須早於互動選件 pre-route,
+    #    否則「PTT…預算X…菜單」會被當成互動選件而誤進 ecommerce)。
+    #    註:單純「菜單/推薦」不在 ARTICLE_SOURCE_KEYWORDS,不會誤觸。
+    # 只看「使用者 request」本身,不看 LLM 產生的 plan(plan 可能含『文章』等字而誤觸)。
+    article_source_match = _contains_keyword((request or "").lower(), ARTICLE_SOURCE_KEYWORDS)
+    if article_source_match and not state.get("pc_board_response"):
+        return ["pc_board_scraper"], "使用者明確要求 PTT/電蝦/文章資料，先查詢 PC_Board 文章"
+
     # 1. Deterministic 前置路由：互動式逐步選件必須直接進 ecommerce。
     # 這可避免「我選第 N 個 / 無 / 重新選 / 確認保存」被誤送到 specialist，
     # 導致 selected_components / last_component_options 沒有更新。
+    # 但若使用者明確點名文章來源(PTT/電蝦/文章…)，不在此被導向 ecommerce：
+    # 該需求走 pc_board_scraper → specialist → integrator(由文章內容作答)。
     try:
         from pc_builder_agent.tools.ecommerce_db import is_interactive_selection_request
 
-        if is_interactive_selection_request(request):
+        if not article_source_match and is_interactive_selection_request(request):
             return ["ecommerce"], "偵測到互動式逐步選件動作, deterministic 直接導向 ecommerce"
     except Exception:
         pass

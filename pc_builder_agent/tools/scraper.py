@@ -813,7 +813,7 @@ def load_articles_from_disk(profile_id: str = "default") -> list[dict]:
         try:
             with open(articles_file, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except json.JSONDecodeError, IOError:
+        except (json.JSONDecodeError, IOError):
             return []
 
     return []
