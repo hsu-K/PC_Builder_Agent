@@ -15,6 +15,7 @@ from pc_builder_agent.memory import (
     recall_pc_board_articles,
 )
 from pc_builder_agent.tools.hardware import estimate_psu_wattage
+from pc_builder_agent.tools.component_search import search_component_web
 from pc_builder_agent.tools.scraper import web_scrape, pc_board_scraper
 from pc_builder_agent.tools.ecommerce_tools import (
     search_ecommerce_products,
@@ -54,6 +55,7 @@ __all__ = [
     "save_user_preference",
     "recall_pc_board_articles",
     "estimate_psu_wattage",
+    "search_component_web",
     "web_scrape",
     "pc_board_scraper",
     "search_ecommerce_products",

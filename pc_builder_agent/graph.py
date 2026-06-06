@@ -24,6 +24,9 @@ from pc_builder_agent.nodes import (
     router_node,
     cpu_specialist_node,
     gpu_specialist_node,
+    memory_specialist_node,
+    storage_specialist_node,
+    cooling_specialist_node,
     integrator_node,
     pc_board_scraper_node,
     ecommerce_node,
@@ -43,13 +46,17 @@ class BuildState(TypedDict, total=False):
         profile_id (str): 使用者 ID，用於查詢和保存偏好設定
         preferences (dict): 從 preference.json 讀取的使用者偏好
         pc_board_results (list): 從 PC_Board Scraper 爬取的文章列表
+        pc_board_query_attempted (bool): 是否已嘗試執行過 PC_Board 查詢
         request (str): 使用者最新的 PC 組裝需求
         messages (Annotated[list[BaseMessage]]): 完整的對話歷史
-        plan (str): planner agent 的分析結果
+        plan (str): planner agent 輸出的 JSON 計畫
         route_targets (list[str]): router 選中的 subAgent 名稱
         route_reason (str): router 做出此選擇的原因
         cpu_advice (str): CPU specialist 的建議
         gpu_advice (str): GPU specialist 的建議
+        memory_advice (str): Memory specialist 的建議
+        storage_advice (str): Storage specialist 的建議
+        cooling_advice (str): Cooling specialist 的建議
         pc_board_response (str): PC_Board Scraper 的查詢回應
         ecommerce_advice (str): Ecommerce Recommendation Specialist 的商品/優惠建議
         ecommerce_db_path (str): ecommerce 查詢使用的資料庫路徑(可選,主要供測試注入)
@@ -70,6 +77,7 @@ class BuildState(TypedDict, total=False):
     profile_id: str
     preferences: dict
     pc_board_results: list
+    pc_board_query_attempted: bool
     request: str
     messages: Annotated[list[BaseMessage], add_messages]
     plan: str
@@ -77,6 +85,9 @@ class BuildState(TypedDict, total=False):
     route_reason: str
     cpu_advice: str
     gpu_advice: str
+    memory_advice: str
+    storage_advice: str
+    cooling_advice: str
     pc_board_response: str
     ecommerce_advice: str
     ecommerce_db_path: str
@@ -103,11 +114,11 @@ DEFAULT_FAN_OUT = ["cpu_specialist", "gpu_specialist"]
 
 def _dispatch_specialists(state: BuildState) -> list[Send]:
     """根據 router 結果，決定要並行執行哪些 subAgent"""
-    # print(state)
-    targets = state.get("route_targets") or DEFAULT_FAN_OUT
-
-    # 維持 pc_board_scraper 短路(MVP 已知限制):
-    # 只要 targets 含 pc_board_scraper，就只送 pc_board_scraper(它接 END，不進 integrator)。
+    
+    # 如果沒有 router 結果，退回預設的雙專家，之後可能需要改成直接進結論
+    targets = state.get("route_targets") or ["cpu_specialist", "gpu_specialist"]
+    
+    # 如果包含 pc_board_scraper，優先執行它
     if "pc_board_scraper" in targets:
         return [Send("pc_board_scraper", dict(state))]
 
@@ -129,25 +140,29 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     """
     建構完整的 LangGraph 工作流程
     
-    執行流程圖：
-    
-        START
-          ↓
-        planner (理解需求，查詢/保存偏好)
-          ↓
-        router (根據需求選擇要啟動哪些 subAgent)
-            ↓
-        ┌─────────────────────────┐
-        ↓                         ↓
-    pc_board_scraper     ┌─────────────────┐
-        ↓                ↓                 ↓
-       END          cpu_specialist    gpu_specialist (依需求 fan-out)
-                       ↓                 ↓
-                       └─────────────────┘
-                         ↓
-                       integrator (整合所有建議)
-                         ↓
-                        END
+        執行流程圖：
+
+                START
+                    ↓
+                planner (理解需求並產生查詢/分析計畫)
+                    ↓
+                router (決定先查文章或直接啟動 specialist)
+                    ↓
+            ┌────────────────────────────────────────────────────┐
+            │                                                    │
+            │ 若需要先查文章且尚未載入：                            │
+            │   pc_board_scraper (query 模式讀取/解讀本地文章)     │
+            │                    ↓                               │
+            │                  router (再次判斷下一步)            │
+            │                                                    │
+            └────────────────────────────────────────────────────┘
+                                                    ↓
+                             cpu_specialist / gpu_specialist
+                                        (依需求 fan-out)
+                                                    ↓
+                                            integrator (整合所有建議)
+                                                    ↓
+                                                 END
     
     Args:
         model_name: 使用的 OpenAI 模型名稱
@@ -162,6 +177,9 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_node("router", lambda state: router_node(state, model_name=model_name, debug=debug))
     graph.add_node("cpu_specialist", lambda state: cpu_specialist_node(state, model_name=model_name, debug=debug))
     graph.add_node("gpu_specialist", lambda state: gpu_specialist_node(state, model_name=model_name, debug=debug))
+    graph.add_node("memory_specialist", lambda state: memory_specialist_node(state, model_name=model_name, debug=debug))
+    graph.add_node("storage_specialist", lambda state: storage_specialist_node(state, model_name=model_name, debug=debug))
+    graph.add_node("cooling_specialist", lambda state: cooling_specialist_node(state, model_name=model_name, debug=debug))
     graph.add_node("pc_board_scraper", lambda state: pc_board_scraper_node(state, model_name=model_name, mode="query", debug=debug))
     graph.add_node("ecommerce", lambda state: ecommerce_node(state, model_name=model_name, debug=debug))
     graph.add_node("integrator", lambda state: integrator_node(state, model_name=model_name, debug=debug))
@@ -170,10 +188,13 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "router")
     graph.add_conditional_edges("router", _dispatch_specialists)
-    graph.add_edge("pc_board_scraper", END)
+    graph.add_edge("pc_board_scraper", "router")
     graph.add_edge("cpu_specialist", "integrator")
     graph.add_edge("gpu_specialist", "integrator")
     graph.add_edge("ecommerce", "integrator")
+    graph.add_edge("memory_specialist", "integrator")
+    graph.add_edge("storage_specialist", "integrator")
+    graph.add_edge("cooling_specialist", "integrator")
     graph.add_edge("integrator", END)
 
     # 編譯工作流程圖

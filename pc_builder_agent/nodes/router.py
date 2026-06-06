@@ -1,23 +1,28 @@
 """
-Router Node - 根據需求決定啟動哪些 subAgent
+Router Node - 根據 planner 產生的計畫決定下一步要啟動哪些 subAgent。
 
 職責：
-- 使用 LLM 的語意理解決定要啟動哪些專家
-- 備援關鍵字匹配以防 LLM 失敗
-- 支持路由到 pc_board_scraper 進行文章查詢
-- 返回選中的 subAgent 名稱和路由原因
+- 先判斷是否需要讀取 PC_Board 文章
+- 若需要且尚未載入文章，先路由到 pc_board_scraper
+- 文章已載入後，再路由到對應的 specialist
+- 提供備援關鍵字路由，避免 plan 格式不完整時失效
 """
 
 import json
 import re
 from typing import Any
-from langchain_core.messages import HumanMessage, SystemMessage
-from pc_builder_agent.nodes.base import build_model, message_text
 
 
 # 常數定義
-# 注意:route target 名稱需與 graph.py 的 add_node 名稱一致(ecommerce 節點名為 "ecommerce")
-AVAILABLE_SPECIALISTS = ["cpu_specialist", "gpu_specialist", "pc_board_scraper", "ecommerce"]
+AVAILABLE_SPECIALISTS = [
+    "cpu_specialist",
+    "gpu_specialist",
+    "memory_specialist",
+    "storage_specialist",
+    "cooling_specialist",
+    "pc_board_scraper",
+    "ecommerce",
+]
 DEFAULT_ROUTE_TARGETS = ["cpu_specialist", "gpu_specialist"]
 
 CPU_KEYWORDS = (
@@ -36,18 +41,23 @@ _GPU_AI_RE = re.compile(r"(?<![a-z])ai(?![a-z])")
 # 舊的廣義 PC_Board 關鍵字(含「推薦/有什麼/介紹」等泛用詞)。
 # 依 Phase 4B 規格保留不大幅移除,避免破壞既有引用;但 fallback 路由「不再」用它做判斷,
 # 改用下方更精確的 PC_BOARD_DISCUSSION_KEYWORDS,以免泛用詞把選型/商城問題誤導到 pc_board。
+MEMORY_KEYWORDS = (
+    "記憶體", "ram", "ddr", "xmp", "expo", "時序", "頻率",
+)
+
+STORAGE_KEYWORDS = (
+    "ssd", "hdd", "硬碟", "儲存", "nvme", "pcie", "tbw", "容量",
+)
+
+COOLING_KEYWORDS = (
+    "散熱", "風扇", "水冷", "塔散", "溫度", "噪音", "風道",
+)
+
 PC_BOARD_KEYWORDS = (
     "文章", "菜單", "推薦", "ptt", "分享", "討論", "社群",
     "之前", "爬取", "查看", "看看", "告訴我", "有什麼", "介紹",
 )
 
-# 明確的 PTT / 社群 / 菜單討論詞(刻意比 PC_BOARD_KEYWORDS 窄,不含泛用詞),
-# fallback 只在命中這些詞時才把 pc_board_scraper 納入 targets。
-# 注意:刻意「不放」裸「菜單」—— 「菜單」常指完整 build(屬 ecommerce 完整菜單),
-# pc_board 只在明確的社群來源詞(PTT/電蝦/網友/文章/社群/討論…)出現時才觸發。
-PC_BOARD_DISCUSSION_KEYWORDS = (
-    "ptt", "電蝦", "網友", "文章", "討論", "社群", "分享", "配單", "最近討論",
-)
 
 # 明確的電子商城 / 價格 / 優惠商業意圖詞。
 # 刻意不放入「推薦/有什麼/介紹」等泛用詞,避免把一般問題誤導到 ecommerce。
@@ -95,6 +105,20 @@ _SWITCH_PLATFORM_RE = re.compile(r"換\s*(am5|am4|intel|amd|ddr4|ddr5|lga1700|lg
 _BRAND_INTENT_RE = re.compile(
     r"(想|要|用|選|指定)\s*(amd|intel)|(amd[^a-z]{0,6}intel|intel[^a-z]{0,6}amd)[^a-z]{0,4}都")
 
+ARTICLE_TASK_KEYWORDS = (
+    "compare_articles",
+    "analyze_article_configuration",
+    "article_query",
+    "第一篇",
+    "第二篇",
+    "文章內容",
+    "比較文章",
+    "分析文章",
+    "文章差異",
+    "配置內容",
+    "摘要",
+)
+
 
 def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     """判斷文字是否包含任一關鍵字"""
@@ -111,12 +135,73 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     若回傳的 targets 含 "pc_board_scraper",graph 的 _dispatch_specialists 會短路,
     只執行 pc_board_scraper 並接 END,其餘 target(含 ecommerce)在本 MVP 不會被執行。
     """
+def _parse_plan(plan_text: str) -> dict[str, Any]:
+    """將 planner 輸出的 JSON 計畫轉成 dict。"""
+
+    if not plan_text:
+        return {}
+
+    raw = plan_text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw.replace("json\n", "", 1).strip()
+
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return {}
+        try:
+            parsed = json.loads(raw[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+
+def _normalize_targets(targets: Any) -> list[str]:
+    """過濾非法節點並去重，保持順序。"""
+
+    if isinstance(targets, str):
+        targets = [targets]
+    if not isinstance(targets, list):
+        return []
+
+    filtered_targets: list[str] = []
+    for target in targets:
+        if target in AVAILABLE_SPECIALISTS and target not in filtered_targets:
+            filtered_targets.append(target)
+    return filtered_targets
+
+
+def _extract_plan_targets(state: dict) -> tuple[list[str], bool, str, str]:
+    """從 planner 計畫中抽出後續路由資訊。"""
+
+    plan_data = _parse_plan(state.get("plan", ""))
+    need_pc_board_query = bool(plan_data.get("need_pc_board_query"))
+    specialist_targets = _normalize_targets(plan_data.get("specialist_targets"))
+
+    reason = plan_data.get("reason", "")
+    if not isinstance(reason, str):
+        reason = ""
+
+    summary = plan_data.get("summary", "")
+    if not isinstance(summary, str):
+        summary = ""
+
+    return specialist_targets, need_pc_board_query, reason.strip(), summary.strip()
+
+
+def _is_article_related_request(state: dict) -> bool:
+    """判斷目前需求是否屬於文章相關任務。"""
 
     combined_text = "\n".join(
         part for part in [state.get("request", ""), state.get("plan", "")] if part
     ).lower()
 
-    pc_board_match = _contains_keyword(combined_text, PC_BOARD_DISCUSSION_KEYWORDS)
+    """pc_board_match = _contains_keyword(combined_text, PC_BOARD_DISCUSSION_KEYWORDS)
     interactive_match = (
         _contains_keyword(combined_text, INTERACTIVE_SELECTION_KEYWORDS)
         or bool(_NTH_SELECT_RE.search(combined_text))
@@ -125,7 +210,67 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     )
     ecommerce_match = _contains_keyword(combined_text, ECOMMERCE_KEYWORDS) or interactive_match
     cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
-    gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS) or bool(_GPU_AI_RE.search(combined_text))
+    gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS) or bool(_GPU_AI_RE.search(combined_text))"""
+
+    if any(keyword.lower() in combined_text for keyword in ARTICLE_TASK_KEYWORDS):
+        return True
+
+    plan_data = _parse_plan(state.get("plan", ""))
+    task_type = plan_data.get("task_type", "")
+    if task_type in {"compare_articles", "analyze_article_configuration"}:
+        return True
+
+    article_query = plan_data.get("article_query", "")
+    if isinstance(article_query, str) and article_query.strip():
+        return True
+
+    return False
+
+
+def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
+    """計畫格式不完整時的備援規則，基於關鍵字匹配。"""
+
+    combined_text = "\n".join(
+        part for part in [state.get("request", ""), state.get("plan", "")] if part
+    ).lower()
+    pc_board_loaded = bool(state.get("pc_board_results"))
+
+    # 優先檢查是否在查詢文章
+    pc_board_match = _contains_keyword(combined_text, PC_BOARD_KEYWORDS)
+    if pc_board_match and not pc_board_loaded:
+        return ["pc_board_scraper"], "使用者想先查看或比較 PC_Board 文章，因此先讀取文章"
+
+    if pc_board_match and pc_board_loaded:
+        cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
+        gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS)
+
+        if cpu_match and gpu_match:
+            return ["cpu_specialist", "gpu_specialist"], "文章已載入，接續由 CPU 與 GPU 專家分析差異"
+
+        if gpu_match:
+            return ["gpu_specialist"], "文章已載入，接續由 GPU 專家分析差異"
+
+        if cpu_match:
+            return ["cpu_specialist"], "文章已載入，接續由 CPU 專家分析差異"
+
+        return list(DEFAULT_ROUTE_TARGETS), "文章已載入，接續啟動雙專家進行分析"
+
+    cpu_match = _contains_keyword(combined_text, CPU_KEYWORDS)
+    gpu_match = _contains_keyword(combined_text, GPU_KEYWORDS)
+    memory_match = _contains_keyword(combined_text, MEMORY_KEYWORDS)
+    storage_match = _contains_keyword(combined_text, STORAGE_KEYWORDS)
+    cooling_match = _contains_keyword(combined_text, COOLING_KEYWORDS)
+
+    component_targets: list[str] = []
+    if memory_match:
+        component_targets.append("memory_specialist")
+    if storage_match:
+        component_targets.append("storage_specialist")
+    if cooling_match:
+        component_targets.append("cooling_specialist")
+
+    if component_targets:
+        return component_targets, "需求聚焦於特定零件，改由對應專家進行深入分析"
 
     targets: list[str] = []
     reason_parts: list[str] = []
@@ -163,145 +308,65 @@ def _route_targets_for_request(
     *,
     model_name: str | None = None,
 ) -> tuple[list[str], str]:
-    """使用 LLM 的語意理解決定要啟動哪些 subAgent"""
+    """根據使用者需求、planner 計畫與 deterministic guard 決定路由目標。"""
 
     request = state.get("request", "")
     plan = state.get("plan", "")
 
-    # Deterministic 前置路由(互動式逐步選件):選件動作(第 N 個 / 無 / 重新選 / 確認保存 /
-    # 從 CPU 開始 / 候選 等)一律直接導向 ecommerce,不經 LLM,避免選件中途被誤路由到 specialist
-    # 而漏掉 state 更新(Phase Interactive-State-Driven-Fix)。
+    # 1. Deterministic 前置路由：互動式逐步選件必須直接進 ecommerce。
+    # 這可避免「我選第 N 個 / 無 / 重新選 / 確認保存」被誤送到 specialist，
+    # 導致 selected_components / last_component_options 沒有更新。
     try:
         from pc_builder_agent.tools.ecommerce_db import is_interactive_selection_request
+
         if is_interactive_selection_request(request):
-            return ["ecommerce"], "偵測到互動式逐步選件動作,deterministic 直接導向 ecommerce"
+            return ["ecommerce"], "偵測到互動式逐步選件動作, deterministic 直接導向 ecommerce"
     except Exception:
         pass
 
-    system_prompt = (
-        "You are the PC Builder Router. "
-        "Decide which specialist nodes to activate based on the user's intent. "
-        "Available nodes and their responsibilities:\n"
-        "- cpu_specialist: CPU 選型、CPU 規格、處理器效能與相容性建議。\n"
-        "- gpu_specialist: GPU 選型、遊戲/AI/繪圖用途、顯卡效能與相容性建議。\n"
-        "- pc_board_scraper: PTT / 社群菜單討論、近期菜單分享、網友配單與文章查詢。\n"
-        "- ecommerce: 電子商城商品、價格、優惠、特價、比價、庫存,"
-        "以及原價屋/欣亞/PChome/momo 等商城查詢;**並且**負責『互動式逐步零組件候選推薦』"
-        "(針對某一類零件給 2~3 個資料庫實品候選,並做相容性過濾)。\n"
-        "Selection guidance:\n"
-        "INTERACTIVE COMPONENT SELECTION(互動式逐步選件 — 非常重要):\n"
-        "- ecommerce 不只負責價格/優惠/完整菜單;它也負責『互動式逐步零組件候選推薦』"
-        "(由 recommend_component_options_tool 提供 DB 實品候選 + 相容性過濾)。\n"
-        "- 當使用者要求『候選 / 選項 / 幾個選擇 / 第 N 個 / 逐步選 / 一個一個選 / 先看某一類零件 / "
-        "先選 CPU / 下一步選主機板 / 換 AM5 / 換 Intel / 指定 DDR4 或 DDR5 主機板 / 相容主機板 / "
-        "相容記憶體』時,**必須包含 ecommerce**(例:『給我 CPU 候選』『給我幾張主機板選擇』"
-        "『我選第 2 個,接下來給我主機板』『我想用 AM5 平台,先給我 CPU 候選』"
-        "『我想用 LGA1700 DDR5 主機板,給我 RAM 候選』)。\n"
-        "- **預設組機=互動式逐步選件**:使用者給預算想『組電腦 / 遊戲機 / 文書機 / 主機 / 組一台』"
-        "(例:『我預算 30000 要組遊戲機』『我想自己挑零件』『幫我從 CPU 開始推薦』),**必須包含 "
-        "ecommerce**(由它走 CPU-first 逐步選件)。指定品牌(『我想用 AMD』『我想用 Intel』"
-        "『AMD、Intel 都可以』)同樣**必須包含 ecommerce**。這些都**不可只到 cpu_specialist / "
-        "gpu_specialist**(可併選 specialist,但一定要有 ecommerce)。\n"
-        "- 這類『逐步選某類零件』的請求,即使提到 CPU / 主機板 / 記憶體,也**不可只選 cpu_specialist**;"
-        "若同時涉及 CPU 技術分析可選 ecommerce + cpu_specialist,但**不可只到 cpu_specialist**;"
-        "若涉及 GPU 遊戲效能可選 ecommerce + gpu_specialist,但**不可只到 gpu_specialist**。\n"
-        "- 例外:**純規格比較**(沒有要選購/候選/逐步選的意圖),例如『RTX 5070 vs 5060 Ti 玩 2K 哪個好』、"
-        "『i5-14600K 和 R5 7600 哪顆強』,仍可只選 gpu_specialist / cpu_specialist,不需 ecommerce。\n"
-        "- If the user wants real store products, prices, deals/discounts, stock, "
-        "or price comparison, choose ecommerce. This includes CPU coolers — "
-        "散熱器 / CPU 散熱器 / 水冷 / 空冷 / 塔扇 / AIO 都是 ecommerce 可查的商品類別。\n"
-        "- If the user wants to FIND / BUY / 推薦 a cooler (散熱器/水冷/空冷/塔扇/AIO), "
-        "choose ecommerce. If the request ALSO mentions a CPU model (e.g. R5 7500F、"
-        "7800X3D、i5-14600K), choose BOTH cpu_specialist AND ecommerce — do NOT pick only "
-        "cpu_specialist just because a CPU model appears.\n"
-        "- FULL BUILD / 完整菜單 / 整機:ecommerce 也負責『配一台電腦 / 組一台 / 完整菜單 / "
-        "整機 / 主機 / 預算內組機 / 遊戲機 / 文書機 / 辦公機』。使用者問這類時,通常應選 ecommerce"
-        "(由完整菜單工具處理)。若涉及遊戲效能/GPU 規格,可同時選 gpu_specialist;"
-        "若涉及 CPU 效能/散熱需求,可同時選 cpu_specialist。\n"
-        "- 不要讓單純『菜單』優先導向 pc_board_scraper;pc_board_scraper 只在明確提到 "
-        "PTT / 電蝦 / 網友 / 社群討論 / 文章 / 最近討論 時才選。\n"
-        "- Only choose pc_board_scraper when the user EXPLICITLY refers to community "
-        "discussion sources, e.g. mentions PTT、電蝦、網友、文章、社群討論、最近討論。\n"
-        "- The word 「菜單」 ALONE is NOT enough to choose pc_board_scraper. If 「菜單」 "
-        "appears together with budget/price/deal/store words (預算、優惠、商城、價格、比價、"
-        "原價屋、欣亞) or component needs (GPU/CPU/顯卡/處理器), prefer "
-        "cpu_specialist / gpu_specialist / ecommerce instead of pc_board_scraper.\n"
-        "- If the user wants spec analysis or component selection advice, choose "
-        "cpu_specialist and/or gpu_specialist.\n"
-        "- If the user gives a budget AND asks to find / buy a specific component "
-        "(e.g. 「預算 10000 以內找 GPU」), include BOTH the relevant specialist "
-        "(gpu_specialist / cpu_specialist) AND ecommerce, because the user wants "
-        "actual products within budget, not just selection theory.\n"
-        "- If the request mixes several needs, you may return multiple targets.\n"
-        "- Example: 「30000 元遊戲機菜單，也幫我看有沒有商城優惠」 should map to "
-        '["gpu_specialist", "ecommerce"] (cpu_specialist is also acceptable), '
-        "NOT pc_board_scraper.\n"
-        "- Example: 「請先給我 2~3 個 CPU 候選」 -> must include ecommerce, e.g. "
-        '["ecommerce"] or ["ecommerce", "cpu_specialist"]; NOT only cpu_specialist.\n'
-        "- Example: 「我選第 2 個 CPU，接下來給我相容主機板候選」 -> include ecommerce.\n"
-        "- Example: 「我想用 DDR4 平台，先給我 2~3 張 DDR4 主機板候選」 -> include ecommerce.\n"
-        "- Example: 「我想用 AM5 平台，先給我 CPU 候選」 / 「我想用 Intel 平台，先給我 CPU 候選」 "
-        "-> include ecommerce (cpu_specialist optional, but not alone).\n"
-        "- Counter-example: 「RTX 5070 和 RTX 5060 Ti 玩 2K 哪個比較適合」 -> only "
-        '["gpu_specialist"] (pure spec comparison, NOT ecommerce).\n'
-        "Return JSON only, in this format: "
-        '{"targets": ["cpu_specialist"], "reason": "..."}. '
-        "The targets field must be a non-empty subset of "
-        "[cpu_specialist, gpu_specialist, pc_board_scraper, ecommerce]. "
-        "Note (MVP limitation): if route_targets contains pc_board_scraper, graph 方案 C "
-        "will short-circuit and run only pc_board_scraper. "
-        "Write the reason value in Traditional Chinese (zh-TW)."
-    )
-    user_prompt = (
-        "Decide which nodes are needed for the following context.\n\n"
-        f"request:\n{request}\n\n"
-        f"planner summary:\n{plan}\n"
-    )
+    # 2. Planner-first routing：保留 upstream/main 的正式 planner 路由結果。
+    specialist_targets, need_pc_board_query, reason, summary = _extract_plan_targets(state)
 
-    try:
-        model = build_model(model_name)
-        ai_message = model.invoke(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-        )
-        raw = message_text(ai_message).strip()
+    # 3. PC_Board 文章查詢優先：如果 planner 判斷需要文章，且尚未取得回應，先跑 scraper。
+    pc_board_get_response = bool(state.get("pc_board_response"))
 
-        # 嘗試解析 JSON，若失敗再嘗試擷取最外層 JSON
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise
-            parsed = json.loads(raw[start : end + 1])
+    if need_pc_board_query and not pc_board_get_response:
+        return ["pc_board_scraper"], reason or summary or "需要先讀取 PC_Board 文章再進行分析"
 
-        targets = parsed.get("targets", []) if isinstance(parsed, dict) else []
-        reason = parsed.get("reason", "") if isinstance(parsed, dict) else ""
+    # 後面接原本的 routing 流程：
+    # - 如果 planner 已經有 specialist_targets，就依照 specialist_targets 回傳
+    # - 如果 planner 不完整，再走 LLM router prompt
+    # - 最後再走 _keyword_fallback_route_targets(state)
 
-        if isinstance(targets, str):
-            targets = [targets]
-        if not isinstance(targets, list):
-            targets = []
 
-        # 過濾非法節點並去重，保持順序
-        filtered_targets: list[str] = []
-        for target in targets:
-            if target in AVAILABLE_SPECIALISTS and target not in filtered_targets:
-                filtered_targets.append(target)
+    
+    # 由router判斷是否為文章相關需求，這會影響是否優先查詢 scraper，但跟plan的need_pc_board_query不完全相同(目前先移除)
+    # article_related = _is_article_related_request(state)
 
-        if not filtered_targets:
-            return _keyword_fallback_route_targets(state)
+    # if need_pc_board_query and not pc_board_query_attempted:
+    if need_pc_board_query and not pc_board_get_response:
+        # 文章相關任務在每回合都先查詢一次 scraper，再交給 specialist
+        return ["pc_board_scraper"], reason or summary or "需要先讀取 PC_Board 文章再進行分析"
 
-        clean_reason = reason.strip() if isinstance(reason, str) else ""
-        if not clean_reason:
-            clean_reason = "由 LLM 根據需求語意判斷路由"
+    # if need_pc_board_query and pc_board_loaded:
+    if need_pc_board_query and pc_board_get_response:
+        # 查詢已經完畢或是不需要查詢，接續由專家分析
+        targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
+        post_reason = summary or f"接續啟動 {', '.join(targets)} 進行分析"
+        return targets, post_reason
 
-        return filtered_targets, clean_reason
-    except Exception:
-        return _keyword_fallback_route_targets(state)
+    # if need_pc_board_query and pc_board_query_attempted and not pc_board_loaded:
+    if need_pc_board_query and not pc_board_loaded:
+        # 查詢過但本地沒有文章：降級為直接由專家分析（不要使用 planner 原始 reason）
+        targets = specialist_targets or list(DEFAULT_ROUTE_TARGETS)
+        downgrade_reason = summary or "本地未找到文章，改由專家根據目前需求直接分析"
+        return targets, downgrade_reason
+
+    if specialist_targets:
+        # 若 planner 指定 specialist，使用 planner 的 summary 作為說明，但避免沿用 planner 的 detailed reason
+        return specialist_targets, summary or "依 planner 計畫啟動專家"
+
+    return _keyword_fallback_route_targets(state)
 
 
 def router_node(
@@ -311,13 +376,13 @@ def router_node(
     debug: bool = False,
 ) -> dict[str, Any]:
     """Router Node 的執行函數"""
-    
-    route_targets, route_reason = _route_targets_for_request(state, model_name=model_name)
-    
+
+    route_targets, route_reason = _route_targets_for_request(state)
+
     if debug:
         print("Router Node Route Targets:", route_targets)
         print("Router Node Route Reason:", route_reason)
-        print("===============================================================")
+        print("=" * 60)
 
     return {
         "route_targets": route_targets,

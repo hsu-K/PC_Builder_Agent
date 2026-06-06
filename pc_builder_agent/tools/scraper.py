@@ -7,18 +7,20 @@ Node 只需要透過統一的工具入口來呼叫。
 from __future__ import annotations
 
 import json
+import re
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
+from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
 
 @tool
 def web_scrape(url: str, selector: str | None = None) -> str:
     """抓取指定網址內容，若提供 selector 則只回傳對應區塊文字。"""
-
-    import requests
-    from bs4 import BeautifulSoup
 
     response = requests.get(
         url,
@@ -38,81 +40,709 @@ def web_scrape(url: str, selector: str | None = None) -> str:
     return soup.get_text(" ", strip=True)[:6000]
 
 
+def _parse_nrec(nrec_el) -> int:
+    """Parse PTT list-page nrec (push count) element into an integer.
+
+    - "爆" → 100 (爆文)
+    - "X1"~"X9" → -1~-9
+    - "XX" → -100 (大負評)
+    - numeric string → that number
+    - missing/empty → 0
+    """
+    if nrec_el is None:
+        return 0
+    text = nrec_el.get_text(strip=True)
+    if not text:
+        return 0
+
+    SPECIAL_NREC = {"爆": 100, "XX": -100}
+    if text in SPECIAL_NREC:
+        return SPECIAL_NREC[text]
+
+    if text.startswith("X"):
+        try:
+            return -int(text[1:])
+        except ValueError, IndexError:
+            return 0
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+# 用途分類關鍵字對照表：use_case 觸發詞 → 標題應包含的關鍵字
+USE_CASE_KEYWORDS: dict[str, list[str]] = {
+    "遊戲": ["遊戲", "game", "gaming"],
+    "工作": [
+        "工作",
+        "文書",
+        "辦公",
+        "work",
+        "office",
+    ],
+    "文書": [
+        "工作",
+        "文書",
+        "辦公",
+        "work",
+        "office",
+    ],
+    "剪輯": [
+        "剪輯",
+        "影片",
+        "編輯",
+        "edit",
+        "editing",
+        "video",
+    ],
+    "影片": [
+        "剪輯",
+        "影片",
+        "編輯",
+        "edit",
+        "editing",
+        "video",
+    ],
+    "ai": [
+        "AI",
+        "深度",
+        "機器",
+        "ML",
+        "訓練",
+        "inference",
+        "deep",
+        "learning",
+        "llm",
+    ],
+    "深度": [
+        "AI",
+        "深度",
+        "機器",
+        "ML",
+        "訓練",
+        "inference",
+        "deep",
+        "learning",
+        "llm",
+    ],
+    "機器": [
+        "AI",
+        "深度",
+        "機器",
+        "ML",
+        "訓練",
+        "inference",
+        "deep",
+        "learning",
+        "llm",
+    ],
+}
+
+# PTT 搜尋詢問詞對照表：當比對到的文章太少時，用這些詞去 PTT 搜尋
+USE_CASE_SEARCH_QUERIES: dict[str, str] = {
+    "遊戲": "遊戲",
+    "工作": "文書",
+    "文書": "文書",
+    "剪輯": "剪輯",
+    "影片": "剪輯",
+    "ai": "AI",
+    "深度": "AI",
+    "機器": "AI",
+}
+
+
+def _parse_budget_k(budget: str | None) -> int | None:
+    """將預算字串轉換為 K 單位整數（例如 '50000' → 50, '50k' → 50）"""
+    if not budget:
+        return None
+    budget_str = str(budget).strip().lower()
+    try:
+        if budget_str.endswith("k"):
+            return int(float(budget_str[:-1]))
+        return int(float(budget_str)) // 1000
+    except ValueError, TypeError:
+        return None
+
+
+def _get_budget_range_queries(budget_k: int, use_case: str | None) -> list[str]:
+    """根據預算 K 數與用途，產生預算區間搜尋詢問清單
+
+    搜尋詞依與使用者預算的接近程度排序，確保最相關的結果優先被搜尋。
+
+    例如 budget_k=50, use_case="遊戲" → ["50k遊戲", "45k遊戲", "55k遊戲", "40k遊戲", "60k遊戲", "35k遊戲", "65k遊戲"]
+    """
+    search_kw = _get_search_query(use_case) if use_case else None
+    if not search_kw:
+        return []
+
+    # 預算區間步階：由近到遠擴散
+    # 先搜尋最接近預算的關鍵字，再逐步向外擴散
+    # 這樣當 _fetch_list_entries_for_queries 收集滿 15 篇停下來時，
+    # 最相關的結果已經被找到了
+    steps = [0, -5, 5, -10, 10, -15, 15]
+
+    seen = set()
+    unique_queries: list[str] = []
+    for step in steps:
+        k = budget_k + step
+        if k >= 10:
+            q = f"{k}k{search_kw}"
+            if q not in seen:
+                seen.add(q)
+                unique_queries.append(q)
+
+    return unique_queries
+
+
+def _extract_title_budget_k(title: str) -> int | None:
+    """從文章標題提取預算 K 數
+
+    例如 '[菜單] 120k白色遊戲機' → 120
+         '[菜單] 50k遊戲機' → 50
+         '[菜單] 80~90K遊戲機' → 80 (取第一個數字)
+         '[菜單] 主要玩天堂經典版-健檢' → None (無法判斷)
+    """
+    # Match patterns like "35k", "120K", "80~90k", "10-15k"
+    # First try range pattern (e.g., "80~90K" → capture 80)
+    match = re.search(r"(\d+)\s*[~\-]\s*\d+\s*[kK]", title)
+    if match:
+        return int(match.group(1))
+    # Fallback: simple pattern (e.g., "120k" → capture 120)
+    match = re.search(r"(\d+)\s*[kK]", title)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _matches_use_case(title: str, use_case: str) -> bool:
+    """Check whether an article title matches the requested use case category.
+
+    Uses keyword dict to match user's use_case input against title keywords.
+    """
+    use_case_lower = use_case.lower()
+
+    # Try exact match first
+    for trigger, keywords in USE_CASE_KEYWORDS.items():
+        if trigger in use_case or trigger in use_case_lower:
+            for kw in keywords:
+                if kw in title:
+                    return True
+            return False
+
+    # Fallback: check if any keyword matches at all
+    for trigger, keywords in USE_CASE_KEYWORDS.items():
+        for kw in keywords:
+            if kw in use_case or kw in use_case_lower:
+                if kw in title:
+                    return True
+
+    # Unknown category → match everything
+    return True
+
+
+def _get_search_query(use_case: str) -> str | None:
+    """Get PTT search query for a given use case. Returns None if unknown."""
+    use_case_lower = use_case.lower()
+    for trigger, query in USE_CASE_SEARCH_QUERIES.items():
+        if trigger in use_case or trigger in use_case_lower:
+            return query
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 輔助函式 — PTT 爬蟲
+# ---------------------------------------------------------------------------
+
+
+def _create_ptt_session() -> requests.Session:
+    """建立 PTT session 並完成 over18 認證"""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+    session = requests.Session()
+    session.post(
+        "https://www.ptt.cc/ask/over18",
+        data={"from": "/bbs/PC_Shopping/index.html", "yes": "yes"},
+        headers=headers,
+        timeout=10,
+    )
+    # 手動設定 over18 cookie 作為備援，確保後續請求不會被擋
+    session.cookies.set("over18", "1", domain=".ptt.cc", path="/")
+    return session
+
+
+def _normalize_ptt_url(href: Any) -> str:
+    """將 PTT 的相對網址轉為絕對網址"""
+    href_str = str(href) if href else ""
+    return f"https://www.ptt.cc{href_str}" if href_str.startswith("/") else href_str
+
+
+def _fetch_list_entries(
+    session: requests.Session,
+    max_pages: int = 5,
+    search_query: str | None = None,
+) -> list[dict]:
+    """爬取 PTT 列表頁或搜尋結果頁，收集 [菜單] 文章，最多爬 max_pages 頁
+
+    Args:
+        session: PTT session
+        max_pages: 最多爬幾頁
+        search_query: 若提供，則使用 PTT 搜尋功能而非最新列表
+    """
+    all_entries: list[dict] = []
+
+    if search_query:
+        current_url = f"https://www.ptt.cc/bbs/PC_Shopping/search?q={search_query}"
+    else:
+        current_url = "https://www.ptt.cc/bbs/PC_Shopping/index.html"
+
+    for _ in range(max_pages):
+        try:
+            resp = session.get(str(current_url), timeout=10)
+            resp.raise_for_status()
+        except requests.RequestException:
+            break
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Check if PTT returned "查無此關鍵字" (no results)
+        if "查無此關鍵字" in resp.text or "沒有相關文章" in resp.text:
+            break
+
+        for r_ent in soup.select(".r-ent"):
+            title_el = r_ent.select_one(".title a")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            if not title.startswith("[菜單]"):
+                continue
+
+            full_url = _normalize_ptt_url(title_el.get("href", ""))
+            author_el = r_ent.select_one(".author")
+            author = author_el.get_text(strip=True) if author_el else ""
+            date_el = r_ent.select_one(".date")
+            date = date_el.get_text(strip=True) if date_el else ""
+
+            all_entries.append(
+                {
+                    "title": title,
+                    "url": full_url,
+                    "author": author,
+                    "date": date,
+                    "nrec": _parse_nrec(r_ent.select_one(".nrec")),
+                }
+            )
+
+        if len(all_entries) >= 15:
+            break
+
+        # 往上一頁
+        paging_btns = soup.select(".btn-group-paging a")
+        prev_url = None
+        for btn in paging_btns:
+            if "上頁" in btn.get_text(strip=True):
+                prev_url = _normalize_ptt_url(btn.get("href", ""))
+                break
+        if prev_url:
+            current_url = prev_url
+            time.sleep(0.3)
+        else:
+            break
+
+    return all_entries
+
+
+def _fetch_list_entries_for_queries(
+    session: requests.Session,
+    queries: list[str],
+    existing_urls: set[str],
+    max_per_query: int = 5,
+) -> list[dict]:
+    """嘗試多組 PTT 搜尋詢問，收集不重複的文章列表"""
+    all_entries: list[dict] = []
+    seen_urls = set(existing_urls)
+
+    for query in queries:
+        if len(all_entries) >= 15:  # 收集夠多了就停
+            break
+        entries = _fetch_list_entries(session, max_pages=2, search_query=query)
+        for e in entries:
+            if e["url"] not in seen_urls:
+                seen_urls.add(e["url"])
+                all_entries.append(e)
+        time.sleep(0.3)  # 避免搜尋太頻繁
+
+    return all_entries
+
+
+def _parse_article_date(url: str, list_date: str) -> str:
+    """從 PTT URL 的 Unix timestamp 推斷年份，組合成正確的 YYYY-MM-DD
+
+    PTT article URL: /bbs/PC_Shopping/M.1779872283.A.FDD.html
+    The number after "M." is a Unix timestamp. Extract it, convert to date.
+    list_date is the article list page date ("5/27", "11/07", etc.)
+    """
+    # Extract timestamp from URL
+    match = re.search(r"/M\.(\d+)\.A\.", url)
+    if match:
+        ts = int(match.group(1))
+        dt = datetime.fromtimestamp(ts)
+        return dt.strftime("%Y-%m-%d")
+    # Fallback: use current year with list_date
+    current_year = datetime.now().year
+    return f"{current_year}-{list_date.replace('/', '-')}"
+
+
+def _fetch_article(session: requests.Session, entry: dict) -> dict | None:
+    """爬取單一文章的內容與推文，回傳結構化 article dict；失敗回傳 None"""
+    time.sleep(0.5)
+    try:
+        art_resp = session.get(entry["url"], timeout=10)
+        art_resp.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    art_soup = BeautifulSoup(art_resp.text, "html.parser")
+    main_content = art_soup.select_one("#main-content")
+    if not main_content:
+        return None
+
+    # 4a) 萃取推文結構
+    pushes, push_count, boo_count, neutral_count = _parse_pushes(main_content)
+
+    # 4b) 清理本文
+    clean_content = _clean_article_content(main_content)
+
+    # 4b-2) 精簡為菜單段落：已買/未買 → 總價
+    menu_match = re.search(
+        r"(已買/未買.*?總價[^\n]*(?:元)?)",
+        clean_content,
+        re.DOTALL,
+    )
+    if menu_match:
+        clean_content = menu_match.group(1)
+
+    # 4c) 解析結構化零件
+    components = _parse_components(clean_content)
+
+    # 4d) 推論預算區間 + 其他 metadata
+    inferred_budget, inferred_budget_range = _infer_budget(clean_content)
+
+    url_match = re.search(r"/(M\.\d+\.A\.[A-Z0-9]+)\.html", entry["url"])
+    article_id = f"ptt_{url_match.group(1)}" if url_match else None
+
+    pulled_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
+    pulled_at = pulled_at[:-2] + ":" + pulled_at[-2:]
+
+    return {
+        "id": article_id or "ptt_temp",
+        "source": "ptt",
+        "board": "PC_Shopping",
+        "title": entry["title"],
+        "url": entry["url"],
+        "author": entry["author"],
+        "date": _parse_article_date(entry["url"], entry["date"]),
+        "pulled_at": pulled_at,
+        "content": clean_content,
+        "components": components,
+        "inferred_budget": inferred_budget,
+        "inferred_budget_range": inferred_budget_range,
+        "push_count": push_count,
+        "boo_count": boo_count,
+        "neutral_count": neutral_count,
+        "pushes": pushes,
+    }
+
+
+def _parse_pushes(main_content) -> tuple[list[dict], int, int, int]:
+    """從文章 parse 推噓文結構，同作者連續發言合併為一條
+
+    回傳 (pushes, push_count, boo_count, neutral_count)
+    """
+    raw_pushes: list[dict] = []
+
+    for push_el in main_content.select(".push"):
+        tag_el = push_el.select_one(".push-tag")
+        tag = tag_el.get_text(strip=True).replace("\u200b", "") if tag_el else ""
+        userid_el = push_el.select_one(".push-userid")
+        userid = userid_el.get_text(strip=True) if userid_el else ""
+        content_el = push_el.select_one(".push-content")
+        raw_content = content_el.get_text(strip=True) if content_el else ""
+        ip_el = push_el.select_one(".push-ipdatetime")
+        ipdatetime = ip_el.get_text(strip=True) if ip_el else ""
+
+        if raw_content.startswith(":"):
+            raw_content = raw_content[1:].strip()
+
+        raw_pushes.append(
+            {
+                "tag": tag,
+                "userid": userid,
+                "content": raw_content,
+                "ipdatetime": ipdatetime,
+            }
+        )
+
+    # 統計原始計數（不分合併）
+    push_count = sum(1 for p in raw_pushes if p["tag"] == "推")
+    boo_count = sum(1 for p in raw_pushes if p["tag"] == "噓")
+    neutral_count = sum(1 for p in raw_pushes if p["tag"] == "→")
+
+    # 合併同作者連續發言
+    merged: list[dict] = []
+    for p in raw_pushes:
+        if merged and merged[-1]["userid"] == p["userid"]:
+            merged[-1]["content"] += "\n" + p["content"]
+            merged[-1]["ipdatetime"] = p["ipdatetime"]
+            # 保留最高的 tag priority：噓 > 推 > →
+            existing_tag = merged[-1]["tag"]
+            if p["tag"] == "噓":
+                merged[-1]["tag"] = "噓"
+            elif p["tag"] == "推" and existing_tag == "→":
+                merged[-1]["tag"] = "推"
+        else:
+            merged.append(dict(p))
+
+    return merged, push_count, boo_count, neutral_count
+
+
+def _clean_article_content(main_content) -> str:
+    """清除推文、meta、簽名檔，回傳純文字"""
+    for el in main_content.select(".push"):
+        el.decompose()
+    for el in main_content.select(".article-metaline"):
+        el.decompose()
+    for el in main_content.select(".article-metaline-right"):
+        el.decompose()
+    for el in main_content.select(".f2"):
+        el.decompose()
+    return main_content.get_text("\n", strip=True)
+
+
+COMPONENT_PATTERNS: dict[str, str] = {
+    "cpu": r"CPU\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "mb": r"(?:MB|主機板)\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "ram": r"(?:RAM|記憶體)\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "vga": r"(?:VGA|顯示卡|GPU)\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "cooler": r"(?:Cooler|散熱器)\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "ssd": r"SSD\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "hdd": r"HDD\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "psu": r"(?:PSU|電源供應器)\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "chassis": r"(?:CHASSIS|機殼)\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "monitor": r"MONITOR\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "mouse_kb": r"(?:Mouse/KB|鼠鍵)\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+    "os": r"OS\s*\([^)]*\)[：:][ \t]*([^\n]+)",
+}
+
+
+def _parse_components(content: str) -> dict[str, str]:
+    """從菜單內文解析零件"""
+    components: dict[str, str] = {}
+    for key, pattern in COMPONENT_PATTERNS.items():
+        match = re.search(pattern, content)
+        if match:
+            components[key] = match.group(1).strip()
+    return components
+
+
+def _infer_budget(content: str) -> tuple[int | None, str]:
+    """從總價行推論預算與區間"""
+    total_match = re.search(r"總價[^0-9]*(\d[\d,]*)", content)
+    if not total_match:
+        return None, "unknown"
+    val = int(total_match.group(1).replace(",", ""))
+    if val < 30000:
+        return val, "low"
+    if val <= 60000:
+        return val, "medium"
+    return val, "high"
+
+
+def _filter_within_months(entries: list[dict], months: int = 3) -> list[dict]:
+    """過濾出在指定月份內的文章"""
+    cutoff = datetime.now() - timedelta(days=months * 30)
+
+    filtered: list[dict] = []
+    for e in entries:
+        date_str = _parse_article_date(e["url"], e["date"])
+        try:
+            article_date = datetime.strptime(date_str, "%Y-%m-%d")
+            if article_date >= cutoff:
+                filtered.append(e)
+        except ValueError:
+            filtered.append(e)  # keep if can't parse
+    return filtered
+
+
+def _filter_by_budget(
+    entries: list[dict],
+    user_budget_k: int | None,
+    tolerance: int = 15,
+) -> list[dict]:
+    """過濾文章，只保留預算在使用者指定 ±tolerance K 範圍內的文章
+
+    若文章標題無法判斷預算（無數字），則保留該文章（寧可多給參考，不要誤殺）。
+
+    Args:
+        entries: 文章列表
+        user_budget_k: 使用者預算（K 單位），如 50
+        tolerance: 容忍範圍（K 單位），預設 ±15K
+
+    Returns:
+        過濾後的文章列表
+    """
+    if user_budget_k is None:
+        return entries
+
+    filtered: list[dict] = []
+    min_budget = user_budget_k - tolerance  # e.g., 50-15 = 35
+    max_budget = user_budget_k + tolerance  # e.g., 50+15 = 65
+
+    for entry in entries:
+        title_k = _extract_title_budget_k(entry["title"])
+        if title_k is None:
+            # 無法判斷預算，保留
+            filtered.append(entry)
+        elif min_budget <= title_k <= max_budget:
+            # 在預算範圍內，保留
+            filtered.append(entry)
+        # 其餘排除
+
+    return filtered
+
+
 @tool
 def pc_board_scraper(budget: str | None = None, use_case: str | None = None) -> dict:
-    """根據預算和用途爬取 PC_Board 文章。
-    
-    此工具會查詢 PTT PC_Shopping 版的相關文章，根據使用者偏好推薦。
-    
+    """爬取 PTT PC_Shopping 版 [菜單] 文章，含推噓文分析與社群評價。
+
+    從預算+用途搜尋、純用途搜尋兩個來源收集文章，
+    保留近三個月內的文章，去重後依討論熱度（|nrec|）排序，
+    取前 10 篇，確保結果同時符合用途、預算區間與時效性。
+
     Args:
-        budget: 預算範圍 (如 "50k", "100k" 等)
-        use_case: 使用情境 (如 "遊戲", "工作" 等)
-    
+        budget: 預算範圍 (如 "50k", "100k" 等)，用於搜尋預算相近的菜單
+        use_case: 使用情境 (如 "遊戲", "工作", "剪輯", "AI" 等)
+
     Returns:
-        dict: 包含爬取的文章列表和統計資訊
+        dict: {
+            "status": "success" | "error",
+            "message": str (僅 error 時有),
+            "articles_count": int,
+            "articles": list[dict],  # each with id, title, url, author, date,
+                                     # content, push_count, boo_count, neutral_count, pushes
+                                     # components, inferred_budget, inferred_budget_range
+        }
     """
-    
-    pc_board_articles = []
-    
-    # 模擬文章 1: 預算分析文章
-    if budget and use_case:
-        pc_board_articles.append({
-            "id": "pcb_001",
-            "title": f"[菜單] {budget}遊戲機",
-            "url": "https://www.ptt.cc/bbs/PC_Shopping/M.1779164308.A.DD1.html",
-            "author": "LiuJY0327 (Hansel)",
-            "date": "2026-05-19",
-            "content": (
-                f"預算/用途：{budget}\n"
-                f"每次大概1-2個遊戲在跑而已，SSD抓1T應該夠，也比較符合自己預算\n"
-                f"\n"
-                f"CPU (中央處理器)：AMD Ryzen7 7800X3D Tray\n"
-                f"MB      (主機板)：【任搭CPU】華碩 TUF GAMING B650-E WIFI\n"
-                f"RAM     (記憶體)：【X3D專案】V-COLOR MANTA XSKY RGB DDR5-6000 32GB(16G*2)黑\n"
-                f"VGA     (顯示卡)：【救贖】華碩 PRIME-RX9060XT-O16G\n"
-                f"Cooler  (散熱器)： ID-COOLING FROZN A620 PRO SE ARGB 黑\n"
-                f"SSD   (固態硬碟)：鎧俠 KIOXIA Exceria G2 1TB\n"
-                f"HDD       (硬碟)：\n"
-                f"PSU (電源供應器)：【救贖】MONTECH Century II 850W 金牌電源\n"
-                f"CHASSIS   (機殼)：聯力 V100R 黑 全景玻璃機殼\n"
-                f"MONITOR   (螢幕)：1080p自備\n"
-                f"Mouse/KB  (鼠鍵)：\n"
-                f"OS    (作業系統)：\n"
-                f"\n"
-                f"其它      (自填)：\n"
-                f"總價 (未稅/含稅)：50,499"
-            ),
-            "comments": (
-                "→ marsqq: 如果是跑3a不是競技類的話可考慮降成7700   114.33.93.15 05/19 12:57\n"
-                "→ marsqq: 價差看省起來或補顯卡或其它地方   114.33.93.15 05/19 12:58\n"
-                "推 aa0801aa: idcooling的a410不錯啊，熱管直觸對AMD    27.51.9.211 05/19 15:07"
-            ),
-        })
-    
-    # 模擬文章 2: 顯示卡比較文章
-    pc_board_articles.append({
-        "id": "pcb_002",
-        "title": "2026 年中端顯示卡推薦鑑賞",
-        "url": "https://www.pc-board.cc/bbs/PC_Shopping/M.1234567891.A.html",
-        "author": "GPU_Expert",
-        "date": "2026-05-19",
-        "content": (
-            "我整理了 2026 年中端 GPU 的一些撥特\n"
-            "RTX 4070: 優誼的 1440P 機能\n"
-            "RX 7800 XT: 地鱗章幀，效能相似"
-        ),
-    })
-    
-    return {
-        "status": "success",
-        "articles_count": len(pc_board_articles),
-        "articles": pc_board_articles,
-    }
+
+    try:
+        session = _create_ptt_session()
+        raw_entries: list[dict] = []
+        seen_urls: set[str] = set()
+
+        # 來源 2：預算+用途搜尋
+        budget_k = _parse_budget_k(budget)
+        if budget_k and use_case:
+            budget_queries = _get_budget_range_queries(budget_k, use_case)
+            if budget_queries:
+                for e in _fetch_list_entries_for_queries(
+                    session, budget_queries, seen_urls
+                ):
+                    seen_urls.add(e["url"])
+                    raw_entries.append(e)
+
+        # 來源 3：純用途搜尋補齊
+        if use_case:
+            search_q = _get_search_query(use_case)
+            if search_q:
+                for e in _fetch_list_entries(
+                    session, max_pages=3, search_query=search_q
+                ):
+                    if e["url"] not in seen_urls:
+                        seen_urls.add(e["url"])
+                        raw_entries.append(e)
+
+        # 若無預算也無用途，仍需要基礎搜尋（搜尋「菜單」關鍵字）
+        if not budget_k and not use_case:
+            for e in _fetch_list_entries(session, search_query="菜單"):
+                if e["url"] not in seen_urls:
+                    seen_urls.add(e["url"])
+                    raw_entries.append(e)
+
+        if not raw_entries:
+            return {
+                "status": "error",
+                "message": "未在 PTT PC_Shopping 版找到任何 [菜單] 文章",
+                "articles_count": 0,
+                "articles": [],
+            }
+
+        # === 近三個月過濾 ===
+        raw_entries = _filter_within_months(raw_entries, months=3)
+
+        if not raw_entries:
+            return {
+                "status": "success",
+                "articles_count": 0,
+                "articles": [],
+            }
+
+        # === 按用途過濾 ===
+        if use_case:
+            raw_entries = [
+                e for e in raw_entries if _matches_use_case(e["title"], use_case)
+            ]
+
+        # === 按預算過濾（若文章標題可推斷預算） ===
+        # 固定 ±15K 容忍度，不足 10 篇也不放寬
+        raw_entries = _filter_by_budget(raw_entries, budget_k, tolerance=15)
+
+        if not raw_entries:
+            return {
+                "status": "success",
+                "articles_count": 0,
+                "articles": [],
+            }
+
+        # === 按推文熱度排序，取 top 10 ===
+        raw_entries.sort(key=lambda e: abs(e["nrec"]), reverse=True)
+        top_entries = raw_entries[:10]
+
+        # === 爬取這 10 篇的完整內容 ===
+        articles: list[dict] = []
+        for entry in top_entries:
+            article = _fetch_article(session, entry)
+            if article:
+                articles.append(article)
+
+        return {
+            "status": "success",
+            "articles_count": len(articles),
+            "articles": articles,
+        }
+
+    except requests.RequestException as e:
+        return {
+            "status": "error",
+            "message": f"PTT 連線失敗：{e}",
+            "articles_count": 0,
+            "articles": [],
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"爬取過程發生錯誤：{e}",
+            "articles_count": 0,
+            "articles": [],
+        }
 
 
 # ============================================================================
 # 本地文章存儲功能
 # ============================================================================
+
 
 def get_articles_storage_path() -> Path:
     """取得本地文章存儲目錄"""
@@ -123,67 +753,67 @@ def get_articles_storage_path() -> Path:
 
 def normalize_articles_payload(payload: Any) -> list[dict]:
     """將不同格式的文章回應轉成標準文章列表。"""
-
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
-
     if not isinstance(payload, dict):
         return []
 
-    if "articles" in payload:
-        return normalize_articles_payload(payload["articles"])
+    # Flatten nested "articles"/"Articles" wrappers
+    for key in ("articles", "Articles"):
+        if key in payload:
+            return normalize_articles_payload(payload[key])
 
-    if "Articles" in payload:
-        return normalize_articles_payload(payload["Articles"])
-
-    article_items: list[dict] = []
-    for key in sorted(payload.keys()):
-        value = payload[key]
-        if isinstance(value, dict) and value.get("id") and value.get("title"):
-            article_items.append(value)
-
-    return article_items
+    # Dict with article-like items (legacy format)
+    return [
+        payload[key]
+        for key in sorted(payload)
+        if isinstance(payload[key], dict)
+        and payload[key].get("id")
+        and payload[key].get("title")
+    ]
 
 
-def save_articles_to_disk(articles: list[dict] | dict, profile_id: str = "default") -> Path:
+def save_articles_to_disk(
+    articles: list[dict] | dict, profile_id: str = "default"
+) -> Path:
     """
     將爬取的文章保存到本地
-    
+
     Args:
         articles: 爬取的文章列表
         profile_id: 使用者 ID，用於分組存儲
-    
+
     Returns:
         Path: 保存文件的路徑
     """
     articles_to_save = normalize_articles_payload(articles)
     storage_dir = get_articles_storage_path()
     articles_file = storage_dir / f"articles_{profile_id}.json"
-    
+
     with open(articles_file, "w", encoding="utf-8") as f:
         json.dump(articles_to_save, f, ensure_ascii=False, indent=2)
-    
+
     return articles_file
 
 
 def load_articles_from_disk(profile_id: str = "default") -> list[dict]:
     """
     從本地讀取之前爬取的文章
-    
+
     Args:
         profile_id: 使用者 ID
-    
+
     Returns:
         list: 文章列表，若無則返回空列表
     """
     storage_dir = get_articles_storage_path()
     articles_file = storage_dir / f"articles_{profile_id}.json"
-    
+
     if articles_file.exists():
         try:
             with open(articles_file, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except json.JSONDecodeError, IOError:
             return []
-    
+
     return []

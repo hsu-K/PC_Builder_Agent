@@ -9,6 +9,9 @@ from pc_builder_agent.nodes.planner import planner_node
 from pc_builder_agent.nodes.router import router_node
 from pc_builder_agent.nodes.cpu_specialist import cpu_specialist_node
 from pc_builder_agent.nodes.gpu_specialist import gpu_specialist_node
+from pc_builder_agent.nodes.memory_specialist import memory_specialist_node
+from pc_builder_agent.nodes.storage_specialist import storage_specialist_node
+from pc_builder_agent.nodes.cooling_specialist import cooling_specialist_node
 from pc_builder_agent.nodes.integrator import integrator_node
 from pc_builder_agent.nodes.base import run_agent_turn
 from pc_builder_agent.nodes.pc_board_scraper import pc_board_scraper_node
@@ -19,6 +22,9 @@ __all__ = [
     "router_node",
     "cpu_specialist_node",
     "gpu_specialist_node",
+    "memory_specialist_node",
+    "storage_specialist_node",
+    "cooling_specialist_node",
     "integrator_node",
     "run_agent_turn",
     "pc_board_scraper_node",
