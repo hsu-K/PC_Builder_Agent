@@ -5,9 +5,7 @@ Base Node - 理解需求並整理成可執行的組裝方向
 
 from typing import Any
 from pc_builder_agent.nodes.base import run_agent_turn
-from pc_builder_agent.tools import (
-    # 導入所需的工具
-)
+
 
 
 def base_node(
@@ -29,6 +27,6 @@ def base_node(
     )
 
     if debug:
-        continue  # 在 debug 模式下可以選擇性地輸出 ai_message 和 text 以便調試
+        pass  # 在 debug 模式下可以選擇性地輸出 ai_message 和 text 以便調試
     
     return {"messages": [ai_message], "response": text}
