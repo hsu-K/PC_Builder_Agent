@@ -170,9 +170,15 @@ def run_chat(
         print("\n[正在分析...]")
         
         try:
-            # 每回合先重置查詢旗標，讓文章相關任務先經過 pc_board_scraper
-            # state["pc_board_query_attempted"] = False
+            # 每回合重置路由控制欄位，避免沿用上一輪 request 的 route queue / 進度。
+            # 這些欄位是 graph checkpoint 的一部分；若不清掉，同一個 thread_id 會繼承舊路由。
             state["pc_board_response"] = ""
+            state["route_targets"] = []
+            state["route_reason"] = ""
+            state["execution_order"] = []
+            state["pending_route_targets"] = []
+            state["completed_route_targets"] = []
+            state["routing_started"] = False
 
             # 呼叫 LangGraph 應用執行完整的 agent 分析流程
             # 傳入完整的 State，包含：
@@ -192,6 +198,12 @@ def run_chat(
                     "profile_id": session_id,  # 使用者會話 ID
                     "preferences": state["preferences"],  # 偏好設定
                     "pc_board_response": state.get("pc_board_response", ""),
+                    "route_targets": state.get("route_targets", []),
+                    "route_reason": state.get("route_reason", ""),
+                    "execution_order": state.get("execution_order", []),
+                    "pending_route_targets": state.get("pending_route_targets", []),
+                    "completed_route_targets": state.get("completed_route_targets", []),
+                    "routing_started": state.get("routing_started", False),
                     "request": user_input,  # 目前輪次的使用者需求
                     "messages": messages_history,  # 完整對話歷史
                 },

@@ -11,3 +11,12 @@ wheels/
 .env
 .github
 pc_builder_agent/data/
+
+# 本地端 SQLite 資料庫(例如 ecommerce node 的 data/ecommerce.db,屬本地 demo 資料,不入版控)
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# 互動式選件保存的最終菜單 JSON(本地輸出,不入版控)
+outputs/
+*.build.json
