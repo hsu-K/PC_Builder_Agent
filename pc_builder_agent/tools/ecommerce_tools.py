@@ -43,7 +43,7 @@ _MAX_LIMIT = 20
 _EMPTY_DB_MESSAGE = (
     "目前找不到本地商品資料庫 data/ecommerce.db(尚未建立)。\n"
     "請先在專案根目錄執行:\n"
-    "  uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path data/ecommerce.db\n"
+    "  uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path pc_builder_agent/data/ecommerce.db\n"
     "建立本地商品資料庫後,再查詢商品或產生完整菜單。\n"
     "(注意:沒有本地 DB 時無法查到真實商品;seed demo data 僅為 fallback / 示範,非正式商品資料。)"
 )
@@ -63,7 +63,7 @@ _NO_PROMO_MESSAGE = (
 _NO_PRODUCTS_MESSAGE = (
     "本地商品資料庫存在,但目前沒有任何商品資料(可能尚未成功匯入)。\n"
     "請在專案根目錄執行:\n"
-    "  uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path data/ecommerce.db\n"
+    "  uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path pc_builder_agent/data/ecommerce.db\n"
     "匯入商品後再查詢。(seed demo data 僅為 fallback / 示範,非正式商品資料。)"
 )
 

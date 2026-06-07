@@ -86,7 +86,7 @@ ECOMMERCE_KEYWORDS = (
 
 
 # 互動式的關鍵字，目前用不到
-"""
+
 # 互動式逐步選件意圖詞(由 recommend_component_options_tool 處理,屬 ecommerce)。
 # 刻意搭配「選件意圖」或「零組件+世代/平台」,避免只因泛用詞(如「推薦」)就誤導到 ecommerce。
 # 注意:文字會先 .lower(),故英文一律小寫;中文不受影響。
@@ -118,7 +118,7 @@ _SWITCH_PLATFORM_RE = re.compile(r"換\s*(am5|am4|intel|amd|ddr4|ddr5|lga1700|lg
 _BRAND_INTENT_RE = re.compile(
     r"(想|要|用|選|指定)\s*(amd|intel)|(amd[^a-z]{0,6}intel|intel[^a-z]{0,6}amd)[^a-z]{0,4}都")
 
-"""
+
 
 
 ARTICLE_TASK_KEYWORDS = (
@@ -298,7 +298,7 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
         reason_parts.append("偵測到 PTT/社群/菜單討論詞")
     if ecommerce_match:
         targets.append("ecommerce")
-            reason_parts.append("偵測到商城/價格/優惠等商業意圖詞")
+        reason_parts.append("偵測到商城/價格/優惠等商業意圖詞")
     if gpu_match:
         targets.append("gpu_specialist")
         reason_parts.append("偵測到顯卡/遊戲/圖形需求")

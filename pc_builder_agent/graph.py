@@ -103,19 +103,18 @@ class BuildState(TypedDict, total=False):
     pc_board_response: str
     final_answer: str
     
-    
     ecommerce_advice: str
     ecommerce_db_path: str
     
     # 互動式選件 state(Phase Interactive-State-Driven-Fix)
-    selected_components: dict
-    selected_budget: int | None
-    selected_use_case: str | None
-    current_target_category: str | None
-    last_component_options: list
-    selection_flow_complete: bool
-    pending_reselect_category: str | None
-    interactive_response: bool
+    # selected_components: dict
+    # selected_budget: int | None
+    # selected_use_case: str | None
+    # current_target_category: str | None
+    # last_component_options: list
+    # selection_flow_complete: bool
+    # pending_reselect_category: str | None
+    # interactive_response: bool
 
 
 # ============================================================================

@@ -191,7 +191,7 @@ uv run python -m pc_builder_agent.tools.ecommerce_update --max-per-category 20
 確認結果合理後，正式寫入本地 DB（完整解析結果）：
 
 ```bash
-uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path data/ecommerce.db
+uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path pc_builder_agent/data/ecommerce.db
 ```
 
 說明與注意事項：
@@ -223,7 +223,7 @@ uv run python -m pc_builder_agent.tools.ecommerce_update
 5. **正式寫入**本地 DB:
 
 ```bash
-uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path data/ecommerce.db
+uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path pc_builder_agent/data/ecommerce.db
 ```
 
 6. **建議正式寫入前先備份**(備份檔同樣被 `.gitignore` 排除):

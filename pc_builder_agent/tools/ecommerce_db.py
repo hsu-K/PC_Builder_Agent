@@ -40,7 +40,7 @@ from typing import Any
 from pc_builder_agent.tools import platform_rules as _pr
 
 
-DEFAULT_DB_PATH = "data/ecommerce.db"
+DEFAULT_DB_PATH = "pc_builder_agent/data/ecommerce.db"
 
 
 # ============================================================================
