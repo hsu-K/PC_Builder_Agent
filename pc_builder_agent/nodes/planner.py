@@ -4,15 +4,12 @@ Planner Node - 只負責把使用者需求整理成 router 可執行的計畫。
 職責：
 - 分析使用者需求的任務類型
 - 判斷是否需要先讀取 PC_Board 文章
-- 規劃後續應啟動的 specialist
+- 規劃後續應啟動的 specialist 與 ecommerce
 - 輸出結構化計畫，不直接解題
 """
 
 from typing import Any
 from pc_builder_agent.nodes.base import run_agent_turn
-
-
-specialist = ["cpu_specialist", "gpu_specialist"]
 
 def planner_node(
     state: dict,
@@ -31,7 +28,9 @@ def planner_node(
             "Analyze the request and produce a structured execution plan for router.\n"
             "If the user wants to compare articles, find differences between articles, or inspect article contents before analysis, set need_pc_board_query to true.\n"
             "When a PC_Board query is needed, describe the article_query clearly, such as first article vs second article, a specific board post, or relevant menu articles.\n"
-            "Choose downstream specialist_targets that should run after the query, such as cpu_specialist and gpu_specialist.\n"
+            "Choose downstream specialist_targets that should run after the query, including [cpu_specialist, gpu_specialist, memory_specialist, storage_specialist, cooling_specialist].\n"
+            "If the user request involves checking current prices, availability, or making purchase decisions, include ecommerce in specialist_targets.\n"
+            "If ecommerce is needed, include it in execution_order after all specialist nodes so it runs last before integrator.\n"
             "Return JSON only, with keys: task_type, need_pc_board_query, article_query, specialist_targets, comparison_axes, execution_order, summary, reason.\n"
             "summary and reason must be in Traditional Chinese (zh-TW).\n"
             "Do not include markdown fences, extra commentary, or direct recommendations."

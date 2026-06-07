@@ -52,6 +52,12 @@ class BuildState(TypedDict, total=False):
         plan (str): planner agent 輸出的 JSON 計畫
         route_targets (list[str]): router 選中的 subAgent 名稱
         route_reason (str): router 做出此選擇的原因
+
+        execution_order (list[str]): planner 建議的實際執行順序
+        pending_route_targets (list[str]): 尚未執行的 route queue
+        routing_started (bool): 是否已經開始順序式路由
+        completed_route_targets (list[str]): 已完成的 route queue
+
         cpu_advice (str): CPU specialist 的建議
         gpu_advice (str): GPU specialist 的建議
         memory_advice (str): Memory specialist 的建議
@@ -83,15 +89,24 @@ class BuildState(TypedDict, total=False):
     plan: str
     route_targets: list[str]
     route_reason: str
+
+    execution_order: list[str]
+    pending_route_targets: list[str]
+    routing_started: bool
+    completed_route_targets: list[str]
+    
     cpu_advice: str
     gpu_advice: str
     memory_advice: str
     storage_advice: str
     cooling_advice: str
     pc_board_response: str
+    final_answer: str
+    
+    
     ecommerce_advice: str
     ecommerce_db_path: str
-    final_answer: str
+    
     # 互動式選件 state(Phase Interactive-State-Driven-Fix)
     selected_components: dict
     selected_budget: int | None
@@ -107,28 +122,49 @@ class BuildState(TypedDict, total=False):
 # 工作流程輔助函數
 # ============================================================================
 
-# 可並行 fan-out 並收斂到 integrator 的 specialist(pc_board_scraper 不在此列,它走短路 → END)
-FAN_OUT_SPECIALISTS = ("cpu_specialist", "gpu_specialist", "ecommerce")
-DEFAULT_FAN_OUT = ["cpu_specialist", "gpu_specialist"]
+AVAILABLE_ROUTE_TARGETS = {
+    "cpu_specialist",
+    "gpu_specialist",
+    "memory_specialist",
+    "storage_specialist",
+    "cooling_specialist",
+    "pc_board_scraper",
+    "ecommerce",
+}
 
 
-def _dispatch_specialists(state: BuildState) -> list[Send]:
-    """根據 router 結果，決定要並行執行哪些 subAgent"""
-    
-    # 如果沒有 router 結果，退回預設的雙專家，之後可能需要改成直接進結論
-    targets = state.get("route_targets") or ["cpu_specialist", "gpu_specialist"]
-    
-    # 如果包含 pc_board_scraper，優先執行它
-    if "pc_board_scraper" in targets:
-        return [Send("pc_board_scraper", dict(state))]
+def _with_completed_target(state: BuildState, result: dict[str, object], target: str) -> dict[str, object]:
+    """把已完成的 target 累加到 state 中，供下一輪 router 取用。"""
 
-    # 非 pc_board 情況:cpu_specialist / gpu_specialist / ecommerce 都可並行 fan-out → integrator。
-    # 過濾掉未知 target 以避免 Send 到不存在的節點;若過濾後為空，退回原本預設雙專家。
-    dispatch_targets = [t for t in targets if t in FAN_OUT_SPECIALISTS]
-    if not dispatch_targets:
-        dispatch_targets = list(DEFAULT_FAN_OUT)
+    output = dict(result or {})
+    completed = list(state.get("completed_route_targets") or [])
+    if not completed or completed[-1] != target:
+        completed.append(target)
+    output["completed_route_targets"] = completed
+    return output
 
-    return [Send(target, dict(state)) for target in dispatch_targets]
+
+def _dispatch_next_target(state: BuildState) -> list[Send]:
+    """依照 route queue 順序，逐一派送下一個 node。"""
+
+    route_targets = list(state.get("route_targets") or [])
+    completed_targets = list(state.get("completed_route_targets") or [])
+
+    if not route_targets:
+        return [Send("integrator", dict(state))]
+
+    next_index = len(completed_targets)
+    if next_index >= len(route_targets):
+        return [Send("integrator", dict(state))]
+
+    next_target = route_targets[next_index]
+    if next_target not in AVAILABLE_ROUTE_TARGETS:
+        return [Send("integrator", dict(state))]
+
+    next_state = dict(state)
+    next_state["routing_started"] = True
+
+    return [Send(next_target, next_state)]
 
 
 
@@ -150,17 +186,14 @@ def build_graph(model_name: str | None = None, debug: bool = False):
                     ↓
             ┌────────────────────────────────────────────────────┐
             │                                                    │
-            │ 若需要先查文章且尚未載入：                            │
-            │   pc_board_scraper (query 模式讀取/解讀本地文章)     │
-            │                    ↓                               │
-            │                  router (再次判斷下一步)            │
-            │                                                    │
-            └────────────────────────────────────────────────────┘
-                                                    ↓
-                             cpu_specialist / gpu_specialist
-                                        (依需求 fan-out)
-                                                    ↓
-                                            integrator (整合所有建議)
+                │ router 依 planner 的 execution_order 逐一派送下一個 node │
+                │                                                    │
+                └────────────────────────────────────────────────────┘
+                                    ↓
+                       pc_board_scraper / specialists / ecommerce
+                          (依 planner 順序逐一執行)
+                                    ↓
+                                integrator (整合所有建議)
                                                     ↓
                                                  END
     
@@ -175,26 +208,82 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     # 添加所有節點，從 nodes 模組導入
     graph.add_node("planner", lambda state: planner_node(state, model_name=model_name, debug=debug))
     graph.add_node("router", lambda state: router_node(state, model_name=model_name, debug=debug))
-    graph.add_node("cpu_specialist", lambda state: cpu_specialist_node(state, model_name=model_name, debug=debug))
-    graph.add_node("gpu_specialist", lambda state: gpu_specialist_node(state, model_name=model_name, debug=debug))
-    graph.add_node("memory_specialist", lambda state: memory_specialist_node(state, model_name=model_name, debug=debug))
-    graph.add_node("storage_specialist", lambda state: storage_specialist_node(state, model_name=model_name, debug=debug))
-    graph.add_node("cooling_specialist", lambda state: cooling_specialist_node(state, model_name=model_name, debug=debug))
-    graph.add_node("pc_board_scraper", lambda state: pc_board_scraper_node(state, model_name=model_name, mode="query", debug=debug))
-    graph.add_node("ecommerce", lambda state: ecommerce_node(state, model_name=model_name, debug=debug))
-    graph.add_node("integrator", lambda state: integrator_node(state, model_name=model_name, debug=debug))
+    graph.add_node(
+        "cpu_specialist",
+        lambda state: _with_completed_target(
+            state,
+            cpu_specialist_node(state, model_name=model_name, debug=debug),
+            "cpu_specialist",
+        ),
+    )
+    graph.add_node(
+        "gpu_specialist",
+        lambda state: _with_completed_target(
+            state,
+            gpu_specialist_node(state, model_name=model_name, debug=debug),
+            "gpu_specialist",
+        ),
+    )
+    graph.add_node(
+        "memory_specialist",
+        lambda state: _with_completed_target(
+            state,
+            memory_specialist_node(state, model_name=model_name, debug=debug),
+            "memory_specialist",
+        ),
+    )
+    graph.add_node(
+        "storage_specialist",
+        lambda state: _with_completed_target(
+            state,
+            storage_specialist_node(state, model_name=model_name, debug=debug),
+            "storage_specialist",
+        ),
+    )
+    graph.add_node(
+        "cooling_specialist",
+        lambda state: _with_completed_target(
+            state,
+            cooling_specialist_node(state, model_name=model_name, debug=debug),
+            "cooling_specialist",
+        ),
+    )
+    graph.add_node(
+        "pc_board_scraper",
+        lambda state: _with_completed_target(
+            state,
+            pc_board_scraper_node(state, model_name=model_name, mode="query", debug=debug),
+            "pc_board_scraper",
+        ),
+    )
+    graph.add_node(
+        "ecommerce",
+        lambda state: _with_completed_target(
+            state,
+            ecommerce_node(state, model_name=model_name, debug=debug),
+            "ecommerce",
+        ),
+    )
+    graph.add_node(
+        "integrator",
+        lambda state: _with_completed_target(
+            state,
+            integrator_node(state, model_name=model_name, debug=debug),
+            "integrator",
+        ),
+    )
 
     # 定義邊（流程連接）
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "router")
-    graph.add_conditional_edges("router", _dispatch_specialists)
+    graph.add_conditional_edges("router", _dispatch_next_target)
     graph.add_edge("pc_board_scraper", "router")
-    graph.add_edge("cpu_specialist", "integrator")
-    graph.add_edge("gpu_specialist", "integrator")
-    graph.add_edge("ecommerce", "integrator")
-    graph.add_edge("memory_specialist", "integrator")
-    graph.add_edge("storage_specialist", "integrator")
-    graph.add_edge("cooling_specialist", "integrator")
+    graph.add_edge("cpu_specialist", "router")
+    graph.add_edge("gpu_specialist", "router")
+    graph.add_edge("ecommerce", "router")
+    graph.add_edge("memory_specialist", "router")
+    graph.add_edge("storage_specialist", "router")
+    graph.add_edge("cooling_specialist", "router")
     graph.add_edge("integrator", END)
 
     # 編譯工作流程圖
