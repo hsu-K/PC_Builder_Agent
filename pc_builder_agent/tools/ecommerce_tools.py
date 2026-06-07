@@ -19,6 +19,7 @@ from langchain_core.tools import tool
 from pc_builder_agent.tools.ecommerce_db import (
     DEFAULT_DB_PATH,
     query_products,
+    search_products_with_fallback,
     find_deals,
     sanitize_product_for_llm,
     recommend_pc_build,
@@ -137,10 +138,13 @@ def search_ecommerce_products(
     min_price: int | None = None,
     limit: int = 10,
     db_path: str = DEFAULT_DB_PATH,
-) -> list[dict] | str:
+) -> list[dict] | dict | str:
     """查詢電子商城商品資料庫,依條件回傳商品清單。
 
     適用於使用者想找特定零件、品牌、型號或價格區間的商品時。
+    若查詢看起來是在找特定型號,本工具會先做精確查詢;若找不到完全相同商品,
+    會再用品牌 / 系列 / 晶片組 / DDR 世代 / socket 等 token 放寬找相近商品,
+    並明確標示 `exact_match=false` 與 warning,避免把相近商品價格誤說成原查詢型號的精確價格。
 
     Args:
         keyword: 關鍵字,會比對商品名稱 / 品牌 / 型號(例如 "RTX 4060"、"Ryzen"、"華碩")。
@@ -152,14 +156,41 @@ def search_ecommerce_products(
         db_path: 資料庫路徑,預設為正式資料庫。
 
     Returns:
-        商品 dict 列表(已移除 id / dedup_key / model_key 等內部欄位);
-        若資料庫不存在或查無資料,回傳清楚的中文說明字串。
+        1. 一般查詢:商品 dict 列表(已移除 id / dedup_key / model_key 等內部欄位)。
+        2. 特定型號查詢但無 exact match: dict,含 exact_match / fallback_used /
+           warning / matched_strategy / inferred_tokens / products。
+        3. 資料庫不存在或完全查無資料:清楚的中文說明字串。
     """
     _msg = _no_data_message(db_path)
     if _msg:
         return _msg
 
     safe_limit = _clamp_limit(limit)
+    if keyword and str(keyword).strip():
+        result = search_products_with_fallback(
+            keyword=str(keyword).strip(),
+            category=category,
+            source=source,
+            max_price=max_price,
+            min_price=min_price,
+            limit=safe_limit,
+            db_path=db_path,
+        )
+        sanitized_products = [sanitize_product_for_llm(item) for item in result.get("products") or []]
+        if sanitized_products:
+            return {
+                "query": result.get("query"),
+                "category": result.get("category"),
+                "exact_match": bool(result.get("exact_match")),
+                "high_confidence_match": bool(result.get("high_confidence_match")),
+                "fallback_used": bool(result.get("fallback_used")),
+                "warning": result.get("warning"),
+                "matched_strategy": result.get("matched_strategy"),
+                "inferred_tokens": result.get("inferred_tokens"),
+                "products": sanitized_products,
+            }
+        return result.get("warning") or _NO_RESULT_MESSAGE
+
     results = query_products(
         keyword=keyword,
         category=category,
