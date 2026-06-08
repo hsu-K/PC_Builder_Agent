@@ -52,7 +52,7 @@ const DEFAULT_FORM = {
   extra: '',
 }
 
-export default function TemplatePanel({ onSelect }) {
+export default function TemplatePanel({ onSelect, onSavePreference }) {
   const [tab, setTab] = useState('custom')   // 'custom' | 'preset'
   const [form, setForm] = useState(DEFAULT_FORM)
 
@@ -75,12 +75,17 @@ export default function TemplatePanel({ onSelect }) {
     if (form.extra)      parts.push(`其他需求：${form.extra}`)
 
     if (parts.length === 0) return ''
-    return `請幫我規劃一台電腦，條件如下：\n${parts.map(p => `- ${p}`).join('\n')}`
+    //return `請幫我規劃一台電腦，條件如下：\n${parts.map(p => `- ${p}`).join('\n')}`
+    return `${parts.map(p => `- ${p}`).join('\n')}`
   }
 
   const handleApply = () => {
     const text = buildText()
-    if (text) onSelect(text)
+    if (text) {
+      //onSelect(text)
+      alert("已設定偏好設定：\n\n" + text)
+      onSavePreference?.(form)
+    }
   }
 
   const preview = buildText()
@@ -217,11 +222,11 @@ export default function TemplatePanel({ onSelect }) {
 
           {/* 預覽 + 送出 */}
           <div className={styles.previewWrap}>
-            {preview ? (
+            {/*preview ? (
               <div className={styles.preview}>{preview}</div>
             ) : (
               <div className={styles.previewEmpty}>填寫上方條件後，這裡會顯示預覽</div>
-            )}
+            )*/}
             <div className={styles.customActions}>
               <button
                 className={styles.clearBtn}
@@ -234,7 +239,7 @@ export default function TemplatePanel({ onSelect }) {
                 disabled={!preview}
                 onClick={handleApply}
               >
-                套用到輸入框
+                設定偏好
               </button>
             </div>
           </div>

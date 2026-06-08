@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from Message import Message
+from pydantic import BaseModel
 
 from api import generate
 
@@ -15,23 +16,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-@app.post("/chat")
-async def chat(
-    req: str | list[Message], # 純文字或對話紀錄
+class ChatMessage(BaseModel):
+    req: str | list[Message]    # 純文字或對話紀錄
+    preference: dict = {}       # 偏好設置
     # id: str,
     # build: PCParts|None=None
     # 其他資訊
-  ):
-    print(f"Recieve:\n{req}")
+
+@app.post("/chat")
+async def chat(chatMessage: ChatMessage):
+    print(f"Receive:\n{chatMessage}")
     try:
+        req = chatMessage.req
         if isinstance(req, str):
             req = [{"role": "user", "content": req}]
-        response = generate(req, None)
+        response = generate(
+            req=req,
+            preference=chatMessage.preference
+        )
     except Exception as e:
         response = {
             "error": e
         }
+        print(e)
 
     #return StreamingResponse(response, media_type="text/event-stream")
     return response

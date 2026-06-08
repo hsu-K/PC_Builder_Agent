@@ -8,8 +8,8 @@ export function useChat(initialMessages = []) {
     const shouldSync =
       initialMessages.length !== messages.length ||
       initialMessages.some((msg, idx) =>
-        msg.role !== messages[idx]?.role || msg.content !== messages[idx]?.content
-      )
+      msg.role !== messages[idx]?.role || msg.content !== messages[idx]?.content
+  )
 
     if (shouldSync) {
       setMessages(initialMessages)
@@ -21,9 +21,8 @@ export function useChat(initialMessages = []) {
 
   const sendMessage = async (
     text,
-    //id,
-    //currBuild,
     onBuildUpdate,
+    preference = {},
   ) => {
       const newMessages = [...messages, { role: 'user', content: text }]
       setMessages(newMessages)
@@ -33,7 +32,7 @@ export function useChat(initialMessages = []) {
     try {
       // TODO: 接API
       if(!useMock){
-        const body = [...newMessages]
+        const body = { req: newMessages, preference }
         const fetchResponse = await fetch('http://localhost:8000/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

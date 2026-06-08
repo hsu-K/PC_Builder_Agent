@@ -6,7 +6,7 @@ import TemplatePanel from './TemplatePanel'
 import styles from './ChatPanel.module.css'
 
 
-export default function ChatInput({ onSend, disabled }) {
+export default function ChatInput({ onSend, disabled, onSavePreference }) {
   const [text, setText] = useState('')
   const [showMenu, setShowMenu] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
@@ -61,9 +61,18 @@ export default function ChatInput({ onSend, disabled }) {
     textareaRef.current?.focus()
   }
 
+  /*
   // 從模板選完後填入輸入框
   const handleTemplateSelect = (templateText) => {
     setText(templateText)
+    setShowTemplates(false)
+    textareaRef.current?.focus()
+  }
+  */
+
+  // 直接發送訊息並回覆已設定預設偏好（不進入輸入框，僅顯示，不跑模型）
+  const handleTemplateSelect = (templateText) => {
+    onSend(templateText, false, "已更新偏好設定：" + templateText)
     setShowTemplates(false)
     textareaRef.current?.focus()
   }
@@ -73,7 +82,7 @@ export default function ChatInput({ onSend, disabled }) {
 
       {/* Template 面板 */}
       {showTemplates && (
-        <TemplatePanel onSelect={handleTemplateSelect} />
+        <TemplatePanel onSelect={handleTemplateSelect} onSavePreference={onSavePreference} />
       )}
       {/* 工具列 */}
       <div className={styles.toolbar}>
