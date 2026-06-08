@@ -734,9 +734,100 @@ def _extract_gpu_context(text: str | None) -> dict[str, Any]:
         key = int(re.sub(r"[^0-9]", "", num) or 0)
         if key and key not in numbers:
             numbers.append(key)
+    for num, suffix in re.findall(r"\b([0-9]{4})\s*(TI|SUPER|XT|GRE)?\b", up):
+        n = int(num)
+        if n not in numbers:
+            numbers.append(n)
+        if suffix and suffix not in suffixes:
+            suffixes.append(suffix)
     return {"families": families, "numbers": numbers, "suffixes": suffixes}
 
 
+def _extract_gpu_vram_tokens(text: str | None) -> list[str]:
+    out: list[str] = []
+    for token in _extract_capacity_tokens(text):
+        gb = _capacity_to_gb(token)
+        if gb is not None and 4 <= gb <= 64 and token not in out:
+            out.append(token)
+    return out
+
+
+def _first_or_none(values: list[Any]) -> Any:
+    return values[0] if values else None
+
+
+def _query_specs_from_context(context: dict[str, Any]) -> dict[str, Any]:
+    category = context.get("category")
+    specs: dict[str, Any] = {"category": category}
+    if category == "GPU":
+        fam = _first_or_none(context.get("gpu_families") or [])
+        num = _first_or_none(context.get("gpu_numbers") or [])
+        suffix = _first_or_none(context.get("gpu_suffixes") or [])
+        if fam or num:
+            model = (f"{fam} {num}" if fam else str(num or "")).strip()
+            if suffix:
+                model = f"{model} {suffix}".strip()
+            specs["gpu_model"] = model
+        if context.get("gpu_vram_capacities"):
+            specs["vram"] = _first_or_none(context.get("gpu_vram_capacities") or [])
+        if context.get("brands"):
+            specs["brand"] = _first_or_none(context.get("brands") or [])
+    elif category == "Motherboard":
+        if context.get("brands"):
+            specs["brand"] = _first_or_none(context.get("brands") or [])
+        if context.get("chipsets"):
+            specs["chipset"] = _first_or_none(context.get("chipsets") or [])
+        if context.get("memory_generation"):
+            specs["memory_generation"] = _first_or_none(context.get("memory_generation") or [])
+        if context.get("sockets"):
+            specs["socket"] = _first_or_none(context.get("sockets") or [])
+    elif category == "RAM":
+        if context.get("brands"):
+            specs["brand"] = _first_or_none(context.get("brands") or [])
+        if context.get("memory_generation"):
+            specs["memory_generation"] = _first_or_none(context.get("memory_generation") or [])
+        if context.get("ram_capacities"):
+            specs["capacity"] = _first_or_none(context.get("ram_capacities") or [])
+        if context.get("ram_speeds"):
+            specs["speed"] = _first_or_none(context.get("ram_speeds") or [])
+    elif category == "Storage":
+        if context.get("brands"):
+            specs["brand"] = _first_or_none(context.get("brands") or [])
+        if context.get("storage_capacities"):
+            specs["capacity"] = _first_or_none(context.get("storage_capacities") or [])
+        if context.get("storage_types"):
+            specs["storage_type"] = list(context.get("storage_types") or [])
+    elif category == "PSU":
+        if context.get("brands"):
+            specs["brand"] = _first_or_none(context.get("brands") or [])
+        if context.get("psu_wattages"):
+            specs["wattage"] = _first_or_none(context.get("psu_wattages") or [])
+        if context.get("psu_certifications"):
+            specs["efficiency"] = _first_or_none(context.get("psu_certifications") or [])
+    elif category == "Cooler":
+        if context.get("cooler_kinds"):
+            specs["cooler_type"] = list(context.get("cooler_kinds") or [])
+        if context.get("cooler_radiators"):
+            specs["radiator_size"] = _first_or_none(context.get("cooler_radiators") or [])
+        if context.get("sockets"):
+            specs["socket"] = _first_or_none(context.get("sockets") or [])
+    return {k: v for k, v in specs.items() if v not in (None, [], "")}
+
+
+def _context_has_required_specs(category: str | None, context: dict[str, Any]) -> bool:
+    if category == "GPU":
+        return bool(context.get("gpu_numbers") or context.get("gpu_suffixes") or context.get("gpu_vram_capacities") or context.get("brands"))
+    if category == "Motherboard":
+        return bool(context.get("chipsets") or context.get("memory_generation") or context.get("sockets") or context.get("brands"))
+    if category == "RAM":
+        return bool(context.get("memory_generation") or context.get("ram_capacities") or context.get("ram_speeds") or context.get("brands"))
+    if category == "Storage":
+        return bool(context.get("storage_capacities") or context.get("storage_types") or context.get("brands"))
+    if category == "PSU":
+        return bool(context.get("psu_wattages") or context.get("psu_certifications") or context.get("brands"))
+    if category == "Cooler":
+        return bool(context.get("cooler_kinds") or context.get("cooler_radiators") or context.get("sockets"))
+    return False
 def _extract_cpu_context(text: str | None) -> dict[str, Any]:
     out = {"brands": [], "families": [], "suffixes": []}
     if not text:
@@ -834,19 +925,19 @@ def _infer_search_category(keyword: str | None, category: str | None) -> str | N
         if alias in text:
             return mapped
     up = raw.upper()
-    if _extract_cpu_context(up)["brands"] or re.search(r"(R[3579]|I[3579])|ULTRA\s?\d", up):
+    if _extract_cpu_context(up)["brands"] or re.search(r"\b(R[3579]|I[3579])\b|\bULTRA\s?\d", up):
         return "CPU"
     if _extract_gpu_context(up)["families"]:
         return "GPU"
-    if re.search(r"DDR[345]", up) or (re.search(r"(3200|3600|4800|5200|5600|6000|6200|6400|6800|7200)", up) and any(tok.endswith("GB") for tok in _extract_capacity_tokens(up))):
+    if re.search(r"DDR[345]", up) or (re.search(r"\b(3200|3600|4800|5200|5600|6000|6200|6400|6800|7200)\b", up) and any(tok.endswith("GB") for tok in _extract_capacity_tokens(up))):
         return "RAM"
     if _extract_storage_types(up) or _extract_capacity_tokens(up) and any(tok in up for tok in ("SSD", "HDD", "NVME", "M.2", "PCIE", "SATA", "GEN4", "GEN5")):
         return "Storage"
-    if _extract_psu_certs(up) or re.search(r"\d{3,4}\s*W", up):
+    if _extract_psu_certs(up) or re.search(r"\b\d{3,4}\s*W\b", up):
         return "PSU"
     if _extract_case_form_factors(up):
         return "Case"
-    if _extract_cooler_kinds(up) or re.search(r"(120|140|240|280|360|420)", up):
+    if _extract_cooler_kinds(up) or re.search(r"\b(120|140|240|280|360|420)\b", up):
         return "Cooler"
     return None
 
@@ -887,9 +978,9 @@ def _extract_search_context(keyword: str | None, category: str | None = None) ->
     for match in re.findall(r"DDR[345]", up):
         if match not in memory_generation:
             memory_generation.append(match)
-    if re.search(r"D5", up) and "DDR5" not in memory_generation:
+    if re.search(r"\bD5\b", up) and "DDR5" not in memory_generation:
         memory_generation.append("DDR5")
-    if re.search(r"D4", up) and "DDR4" not in memory_generation:
+    if re.search(r"\bD4\b", up) and "DDR4" not in memory_generation:
         memory_generation.append("DDR4")
 
     sockets: list[str] = []
@@ -900,6 +991,7 @@ def _extract_search_context(keyword: str | None, category: str | None = None) ->
     capacities = _extract_capacity_tokens(up)
     ram_capacities = capacities if inferred_category == "RAM" else []
     storage_capacities = capacities if inferred_category == "Storage" else []
+    gpu_vram_capacities = _extract_gpu_vram_tokens(up if inferred_category in ("GPU", None) else "")
     ram_speeds = _extract_numeric_tokens(up if inferred_category in ("RAM", None) else "", r"\b(3200|3600|4800|5200|5600|6000|6200|6400|6800|7200)\b")
     psu_wattages = _extract_numeric_tokens(up if inferred_category in ("PSU", None) else "", r"\b(350|400|450|500|550|600|650|700|750|800|850|1000|1200|1300)\s*W\b")
     psu_certs = _extract_psu_certs(up if inferred_category in ("PSU", None) else "")
@@ -927,7 +1019,7 @@ def _extract_search_context(keyword: str | None, category: str | None = None) ->
         if token not in dedup_unknown:
             dedup_unknown.append(token)
 
-    return {
+    context = {
         "raw_query": raw,
         "cleaned_query": cleaned,
         "category": inferred_category,
@@ -948,16 +1040,20 @@ def _extract_search_context(keyword: str | None, category: str | None = None) ->
         "gpu_families": gpu_ctx["families"],
         "gpu_numbers": gpu_ctx["numbers"],
         "gpu_suffixes": gpu_ctx["suffixes"],
+        "gpu_vram_capacities": gpu_vram_capacities,
         "cpu_families": cpu_ctx["families"],
         "cpu_suffixes": cpu_ctx["suffixes"],
         "unknown_model_tokens": dedup_unknown,
+        "query_specs": {},
     }
+    context["query_specs"] = _query_specs_from_context(context)
+    return context
 
 
 def _gpu_number_from_text(value: str | None) -> int | None:
     if not value:
         return None
-    m = re.search(r"(?:RTX|GTX|RX)\s*([0-9]{4})", unicodedata.normalize("NFKC", str(value)).upper())
+    m = re.search(r"\b(?:RTX|GTX|RX)\s*([0-9]{4})(?:\s*(?:TI|SUPER|XT|GRE))?\b", unicodedata.normalize("NFKC", str(value)).upper())
     if m:
         return int(m.group(1))
     return None
@@ -966,12 +1062,7 @@ def _gpu_number_from_text(value: str | None) -> int | None:
 def _gpu_suffixes_from_text(value: str | None) -> list[str]:
     if not value:
         return []
-    up = unicodedata.normalize("NFKC", str(value)).upper()
-    out: list[str] = []
-    for suffix in ("TI", "SUPER", "XT", "GRE"):
-        if suffix in up and suffix not in out:
-            out.append(suffix)
-    return out
+    return _extract_gpu_context(value).get("suffixes", [])
 
 
 def _cpu_family_tokens(value: str | None) -> list[str]:
@@ -1087,6 +1178,8 @@ def _product_search_tokens(product: dict, category: str | None) -> set[str]:
             tokens.add(f"GPUNUM:{num}")
         for suffix in _gpu_suffixes_from_text(gpu_text):
             tokens.add("GPUSFX:" + suffix)
+        for cap in _extract_gpu_vram_tokens((sp.get("capacity") or "") + " " + pname):
+            tokens.add("GPUVRAM:" + cap)
 
     if category == "CPU":
         cpu_text = (product.get("model") or "") + " " + pname
@@ -1096,6 +1189,85 @@ def _product_search_tokens(product: dict, category: str | None) -> set[str]:
             tokens.add("CPUSFX:" + suffix)
 
     return tokens
+
+
+def _product_matches_required_specs(product: dict, context: dict[str, Any], category: str | None) -> bool:
+    ptokens = _product_search_tokens(product, category)
+    if category == "GPU":
+        wanted_brands = {f"BRAND:{b}" for b in context.get("brands") or []}
+        wanted_fams = {f"GPUFAM:{fam}" for fam in context.get("gpu_families") or []}
+        wanted_nums = {f"GPUNUM:{n}" for n in context.get("gpu_numbers") or []}
+        wanted_suffixes = {f"GPUSFX:{s}" for s in context.get("gpu_suffixes") or []}
+        wanted_vram = {f"GPUVRAM:{c}" for c in context.get("gpu_vram_capacities") or []}
+        checks = [
+            not wanted_brands or bool(ptokens & wanted_brands),
+            not wanted_fams or bool(ptokens & wanted_fams),
+            not wanted_nums or bool(ptokens & wanted_nums),
+            not wanted_suffixes or bool(ptokens & wanted_suffixes),
+            not wanted_vram or bool(ptokens & wanted_vram),
+        ]
+        return all(checks)
+    if category == "Motherboard":
+        wanted_brands = {f"BRAND:{b}" for b in context.get("brands") or []}
+        wanted_chip = {"CHIP:" + c for c in context.get("chipsets") or []}
+        wanted_mem = {f"MEM:{m}" for m in context.get("memory_generation") or []}
+        wanted_socket = {f"SOCKET:{s}" for s in context.get("sockets") or []}
+        return all((
+            (not wanted_brands or bool(ptokens & wanted_brands)),
+            (not wanted_chip or bool(ptokens & wanted_chip)),
+            (not wanted_mem or bool(ptokens & wanted_mem)),
+            (not wanted_socket or bool(ptokens & wanted_socket)),
+        ))
+    if category == "RAM":
+        wanted_brands = {f"BRAND:{b}" for b in context.get("brands") or []}
+        wanted_mem = {f"MEM:{m}" for m in context.get("memory_generation") or []}
+        wanted_caps = {f"CAP:{c}" for c in context.get("ram_capacities") or []}
+        wanted_speeds = {f"SPD:{s}" for s in context.get("ram_speeds") or []}
+        return all((
+            (not wanted_brands or bool(ptokens & wanted_brands)),
+            (not wanted_mem or bool(ptokens & wanted_mem)),
+            (not wanted_caps or bool(ptokens & wanted_caps)),
+            (not wanted_speeds or bool(ptokens & wanted_speeds)),
+        ))
+    if category == "Storage":
+        wanted_brands = {f"BRAND:{b}" for b in context.get("brands") or []}
+        wanted_caps = {f"STOCAP:{c}" for c in context.get("storage_capacities") or []}
+        wanted_types = {f"STYPE:{t}" for t in context.get("storage_types") or []}
+        return all((
+            (not wanted_brands or bool(ptokens & wanted_brands)),
+            (not wanted_caps or bool(ptokens & wanted_caps)),
+            (not wanted_types or bool(ptokens & wanted_types)),
+        ))
+    if category == "PSU":
+        wanted_brands = {f"BRAND:{b}" for b in context.get("brands") or []}
+        wanted_watts = {f"WATT:{w}" for w in context.get("psu_wattages") or []}
+        wanted_eff = {f"EFF:{e}" for e in context.get("psu_certifications") or []}
+        return all((
+            (not wanted_brands or bool(ptokens & wanted_brands)),
+            (not wanted_watts or bool(ptokens & wanted_watts)),
+            (not wanted_eff or bool(ptokens & wanted_eff)),
+        ))
+    if category == "Cooler":
+        wanted_kinds = {f"COOL:{k}" for k in context.get("cooler_kinds") or []}
+        wanted_rads = {f"RAD:{r}" for r in context.get("cooler_radiators") or []}
+        wanted_socket = {f"SOCKET:{s}" for s in context.get("sockets") or []}
+        return all((
+            (not wanted_kinds or bool(ptokens & wanted_kinds)),
+            (not wanted_rads or bool(ptokens & wanted_rads)),
+            (not wanted_socket or bool(ptokens & wanted_socket)),
+        ))
+    return True
+
+
+def _select_products_by_required_specs(products: list[dict], context: dict[str, Any], category: str | None) -> tuple[list[dict], bool]:
+    if not products:
+        return [], False
+    if not _context_has_required_specs(category, context):
+        return products, True
+    matched = [item for item in products if _product_matches_required_specs(item, context, category)]
+    if matched:
+        return matched, True
+    return products, False
 
 
 def _filter_products_by_context(products: list[dict], context: dict[str, Any]) -> list[dict]:
@@ -1143,6 +1315,12 @@ def _filter_products_by_context(products: list[dict], context: dict[str, Any]) -
         elif category == "GPU":
             fams = {"GPUFAM:" + fam for fam in context.get("gpu_families") or []}
             if fams and not (ptokens & fams):
+                continue
+            nums = {f"GPUNUM:{n}" for n in context.get("gpu_numbers") or []}
+            if nums and not (ptokens & nums):
+                continue
+            suffixes = {"GPUSFX:" + s for s in context.get("gpu_suffixes") or []}
+            if suffixes and not (ptokens & suffixes):
                 continue
         elif category == "CPU":
             cpu_brands = {"BRAND:" + b for b in context.get("brands") or [] if b in ("AMD", "INTEL")}
@@ -1238,13 +1416,39 @@ def _build_fallback_search_plans(context: dict[str, Any]) -> list[dict[str, Any]
         for rad in context.get("cooler_radiators") or []:
             add("cooler size", [str(rad)], "Cooler")
     elif category == "GPU":
+        suffixes = context.get("gpu_suffixes") or []
+        vrams = context.get("gpu_vram_capacities") or []
         for fam in context.get("gpu_families") or []:
             for num in context.get("gpu_numbers") or []:
+                for suffix in suffixes:
+                    for vram in vrams:
+                        add("gpu family + model + suffix + vram", [fam, str(num), suffix, vram.replace("GB", "G")], "GPU")
+                        add("gpu family + model + suffix + vram", [fam, str(num), suffix, vram], "GPU")
+                    add("gpu family + model + suffix", [fam, str(num), suffix], "GPU")
+                for vram in vrams:
+                    add("gpu family + model + vram", [fam, str(num), vram.replace("GB", "G")], "GPU")
+                    add("gpu family + model + vram", [fam, str(num), vram], "GPU")
                 add("gpu family + model", [fam, str(num)], "GPU")
             add("gpu family", [fam], "GPU")
+        for num in context.get("gpu_numbers") or []:
+            for suffix in suffixes:
+                for vram in vrams:
+                    add("gpu model number + suffix + vram", [str(num), suffix, vram.replace("GB", "G")], "GPU")
+                    add("gpu model number + suffix + vram", [str(num), suffix, vram], "GPU")
+                add("gpu model number + suffix", [str(num), suffix], "GPU")
+            for vram in vrams:
+                add("gpu model number + vram", [str(num), vram.replace("GB", "G")], "GPU")
+                add("gpu model number + vram", [str(num), vram], "GPU")
+            add("gpu model number", [str(num)], "GPU")
         for brand in brands:
             for fam in context.get("gpu_families") or []:
                 add("gpu brand + family", [brand, fam], "GPU")
+            for num in context.get("gpu_numbers") or []:
+                for suffix in suffixes:
+                    add("gpu brand + model + suffix", [brand, str(num), suffix], "GPU")
+                for vram in vrams:
+                    add("gpu brand + model + vram", [brand, str(num), vram], "GPU")
+                add("gpu brand + model", [brand, str(num)], "GPU")
     elif category == "CPU":
         for brand in brands:
             add("cpu brand", [brand], "CPU")
@@ -1287,7 +1491,7 @@ def _has_strong_fallback_anchor(category: str | None, context: dict[str, Any]) -
     if category == "CPU":
         return bool(context.get("brands") or context.get("cpu_families"))
     if category == "GPU":
-        return bool(context.get("gpu_families") or context.get("gpu_numbers") or context.get("brands"))
+        return bool(context.get("gpu_families") or context.get("gpu_numbers") or context.get("gpu_suffixes") or context.get("gpu_vram_capacities") or context.get("brands"))
     if category == "RAM":
         return bool(context.get("memory_generation") or context.get("ram_capacities") or context.get("ram_speeds"))
     if category == "Storage":
@@ -1386,9 +1590,11 @@ def _fallback_rank(item: dict, context: dict[str, Any], category: str | None) ->
             if diff == 0:
                 score += 16
         wanted_suffixes = {"GPUSFX:" + s for s in context.get("gpu_suffixes") or []}
-        score += len(ptokens & wanted_suffixes) * 8
+        score += len(ptokens & wanted_suffixes) * 12
+        wanted_vram = {"GPUVRAM:" + c for c in context.get("gpu_vram_capacities") or []}
+        score += len(ptokens & wanted_vram) * 24
         wanted_brand = {f"BRAND:{b}" for b in context.get("brands") or []}
-        score += len(ptokens & wanted_brand) * 6
+        score += len(ptokens & wanted_brand) * 10
     elif category == "CPU":
         wanted_brand = {f"BRAND:{b}" for b in context.get("brands") or [] if b in ("AMD", "INTEL")}
         score += len(ptokens & wanted_brand) * 18
@@ -1401,6 +1607,53 @@ def _fallback_rank(item: dict, context: dict[str, Any], category: str | None) ->
         score += len(ptokens & wanted_brand) * 8
     price = item.get("price")
     return (-score, price is None, price or 0)
+
+
+def _finalize_search_result(
+    *,
+    query: str,
+    category: str | None,
+    context: dict[str, Any],
+    products: list[dict],
+    exact_match: bool,
+    high_confidence_match: bool,
+    fallback_used: bool,
+    matched_strategy: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    if exact_match:
+        selected = _dedupe_products_by_identity(products)[: int(limit)]
+        spec_match = True if selected else False
+    else:
+        selected, spec_match = _select_products_by_required_specs(products, context, category)
+        selected = _dedupe_products_by_identity(selected)[: int(limit)]
+    query_specs = context.get("query_specs") or _query_specs_from_context(context)
+    if not spec_match and selected:
+        exact_match = False
+        high_confidence_match = False
+        fallback_used = True
+    if selected:
+        if exact_match and spec_match:
+            warning = None
+        elif spec_match:
+            warning = f"沒有找到完全相同型號「{query}」的價格資料，以下是相近商品。"
+        else:
+            warning = f"沒有找到完全符合「{query}」規格條件的商品，以下是相近商品。"
+    else:
+        warning = f"沒有找到完全相同型號「{query}」的價格資料，且目前資料庫沒有足夠相近商品可供參考。"
+    return {
+        "query": query,
+        "category": category,
+        "exact_match": bool(exact_match),
+        "high_confidence_match": bool(high_confidence_match),
+        "spec_match": bool(spec_match) if selected else False,
+        "fallback_used": bool(fallback_used),
+        "warning": warning,
+        "matched_strategy": matched_strategy,
+        "inferred_tokens": context,
+        "query_specs": query_specs,
+        "products": selected,
+    }
 
 
 def _maybe_get_high_confidence_products(
@@ -1483,21 +1736,31 @@ def search_products_with_fallback(
     high_confidence = [item for _, level, item in scored_exact if level in _EXACT_MATCH_LEVELS]
     if high_confidence:
         exact_products = _dedupe_products_by_identity(high_confidence)[: int(limit)]
-        return {
-            "query": keyword,
-            "category": effective_category,
-            "exact_match": True,
-            "high_confidence_match": False,
-            "fallback_used": False,
-            "warning": None,
-            "matched_strategy": "exact",
-            "inferred_tokens": context,
-            "products": exact_products,
-        }
+        return _finalize_search_result(
+            query=keyword,
+            category=effective_category,
+            context=context,
+            products=exact_products,
+            exact_match=True,
+            high_confidence_match=False,
+            fallback_used=False,
+            matched_strategy="exact",
+            limit=limit,
+        )
 
     hc = _maybe_get_high_confidence_products(scored_exact, context, effective_category, limit)
     if hc is not None:
-        return hc
+        return _finalize_search_result(
+            query=keyword,
+            category=effective_category,
+            context=context,
+            products=hc.get("products") or [],
+            exact_match=True,
+            high_confidence_match=True,
+            fallback_used=False,
+            matched_strategy=hc.get("matched_strategy"),
+            limit=limit,
+        )
 
     aggregated: list[dict] = []
     matched_strategy: str | None = None
@@ -1544,25 +1807,17 @@ def search_products_with_fallback(
         if products and matched_strategy is None:
             matched_strategy = "partial keyword match"
 
-    warning = None
-    if products:
-        warning = f"沒有找到完全相同型號「{keyword}」的價格資料，以下是相近商品。"
-    else:
-        warning = (
-            f"沒有找到完全相同型號「{keyword}」的價格資料，且目前資料庫沒有足夠相近商品可供參考。"
-        )
-
-    return {
-        "query": keyword,
-        "category": effective_category,
-        "exact_match": False,
-        "high_confidence_match": False,
-        "fallback_used": True,
-        "warning": warning,
-        "matched_strategy": matched_strategy,
-        "inferred_tokens": context,
-        "products": products,
-    }
+    return _finalize_search_result(
+        query=keyword,
+        category=effective_category,
+        context=context,
+        products=products,
+        exact_match=False,
+        high_confidence_match=False,
+        fallback_used=True,
+        matched_strategy=matched_strategy,
+        limit=limit,
+    )
 
 
 def find_deals(

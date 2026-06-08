@@ -65,12 +65,11 @@ def _build_ecommerce_system_prompt(db_path: str) -> str:
         "Workflow:\n"
         "- Use search_ecommerce_products to find products by keyword / category / "
         "brand / price range (respect the user's budget via max_price).\n"
-        "- If search_ecommerce_products returns exact_match=false / fallback_used=true / warning, "
-        "you MUST clearly say the exact model was not found and the listed prices are for similar "
+        "- If search_ecommerce_products returns exact_match=false / spec_match=false / fallback_used=true / warning, "
+        "you MUST clearly say the exact model or requested spec was not found and the listed prices are for similar "
         "products only; never present them as the queried model's exact price.\n"
         "- If search_ecommerce_products returns exact_match=true or high_confidence_match=true, you may "
         "present the returned product price directly as the matched product's price.\n"
-        "products only; never present them as the queried model's exact price.\n"
         "- Use find_ecommerce_deals_tool when the user wants deals, discounts, "
         "or the cheapest / best-value options.\n"
         "Supported categories in the database (use the EXACT category string):\n"
@@ -269,6 +268,80 @@ def _looks_like_build_request(text: str | None) -> bool:
     return any(token in raw for token in ("組", "菜單", "主機", "遊戲機", "電腦"))
 
 
+def _format_item_price(item: dict[str, Any]) -> str:
+    price_text = item.get("price_text")
+    if price_text:
+        return str(price_text)
+    price = item.get("price")
+    if isinstance(price, int):
+        return f"{price:,} 元"
+    return "價格未提供"
+
+
+def _render_ecommerce_final_answer(request: str | None, ecommerce_options: dict[str, Any] | None) -> str | None:
+    if not ecommerce_options:
+        return None
+    summary = str(ecommerce_options.get("summary") or "").strip()
+    warnings = [str(w).strip() for w in ecommerce_options.get("warnings") or [] if str(w).strip()]
+    items = list(ecommerce_options.get("items") or [])
+    category = ecommerce_options.get("category") or "商品"
+    query = str(ecommerce_options.get("query") or request or "").strip()
+    exact_match = ecommerce_options.get("exact_match")
+    spec_match = ecommerce_options.get("spec_match")
+    lines: list[str] = []
+
+    if warnings:
+        lines.append(warnings[0])
+    elif summary:
+        lines.append(summary)
+    elif exact_match is False or spec_match is False:
+        lines.append(f"沒有找到完全符合「{query}」的商品，以下是相近候選。")
+    else:
+        lines.append(f"以下是「{query}」的查詢結果。")
+
+    if not items:
+        return "\n".join(lines)
+
+    if category == "build":
+        total_price_text = ecommerce_options.get("total_price_text") or ecommerce_options.get("total_price")
+        platform = ecommerce_options.get("platform")
+        if platform:
+            lines.append(f"平台：{platform}")
+        if total_price_text:
+            lines.append(f"總價：{total_price_text}")
+        lines.append("推薦零件如下：")
+        for idx, item in enumerate(items, 1):
+            note_parts = [str(item.get("category_key") or item.get("category") or "零件")]
+            if item.get("compatibility_notes"):
+                note_parts.append(str(item.get("compatibility_notes")))
+            lines.append(f"{idx}. {item.get('name')} — {_format_item_price(item)}（{' / '.join(note_parts)}）")
+        return "\n".join(lines)
+
+    lines.append("候選商品如下：")
+    for idx, item in enumerate(items, 1):
+        detail_bits: list[str] = []
+        if item.get("brand"):
+            detail_bits.append(str(item.get("brand")))
+        if item.get("vram"):
+            detail_bits.append(str(item.get("vram")))
+        elif item.get("memory_generation"):
+            detail_bits.append(str(item.get("memory_generation")))
+        if item.get("chipset"):
+            detail_bits.append(f"晶片組 {item.get('chipset')}")
+        if item.get("capacity") and item.get("category") != "gpu":
+            detail_bits.append(f"容量 {item.get('capacity')}")
+        if item.get("interface"):
+            detail_bits.append(str(item.get("interface")))
+        if item.get("source"):
+            detail_bits.append(str(item.get("source")))
+        tail = f"（{' / '.join(detail_bits)}）" if detail_bits else ""
+        lines.append(f"{idx}. {item.get('name')} — {_format_item_price(item)}{tail}")
+
+    if exact_match is False or spec_match is False:
+        lines.append("以上價格僅供相近商品參考，實際購買請以商城資料為準。")
+    return "\n".join(lines)
+
+
 def _build_structured_options_for_request(request: str | None, db_path: str) -> dict[str, Any] | None:
     text = str(request or "").strip()
     if not text:
@@ -367,14 +440,17 @@ def ecommerce_node(
         debug=debug,
     )
 
+    final_answer = _render_ecommerce_final_answer(state.get("request"), ecommerce_options) or text
+
     if debug:
         print("Ecommerce Node DB Path:", db_path)
         print("Ecommerce Node Advice:", text)
+        print("Ecommerce Node Final:", final_answer)
         print("===============================================================")
 
     return {
-        "messages": [ai_message],
+        "messages": [AIMessage(content=final_answer)],
         "ecommerce_advice": text,
-        "final_answer": text,
+        "final_answer": final_answer,
         "ecommerce_options": ecommerce_options,
     }
