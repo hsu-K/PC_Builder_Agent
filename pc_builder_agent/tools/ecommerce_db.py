@@ -534,6 +534,1037 @@ def query_products(
         conn.close()
 
 
+_SEARCH_SERIES_KEYWORDS = (
+    "PRIME", "TUF", "ROG", "STRIX", "AORUS", "EAGLE",
+    "STEEL LEGEND", "LEGEND", "RIPTIDE", "MASTER", "PULSE",
+    "HELLHOUND", "VENTUS", "WINDFORCE", "SHADOW", "DUAL",
+)
+_WEAK_TOKEN_WORDS = {
+    "PRO", "PLUS", "GAMING", "OC", "RGB", "ARGB", "WIFI", "WIFI7", "WIFI6E",
+    "D5", "D4", "價格", "價錢", "查", "查詢", "幫我", "請幫我", "請問", "這張",
+    "這顆", "這個", "一張", "一顆", "一個", "不存在", "版本", "特仕版", "版",
+}
+_QUERY_NOISE_PATTERNS = (
+    r"請幫我", r"幫我", r"請問", r"價格", r"價錢", r"多少", r"查詢", r"查",
+    r"這張", r"這顆", r"這個", r"一張", r"一顆", r"一個", r"的價格", r"價格資料",
+)
+_SOCKET_KEYWORDS = ("LGA1851", "LGA1700", "AM5", "AM4")
+_EXACT_MATCH_LEVELS = {"exact", "normalized"}
+_HIGH_CONFIDENCE_LEVELS = {"model_key", "brand_model"}
+_STORAGE_TYPE_ALIASES = {
+    "NVME": {"NVME", "M.2", "PCIE", "SSD"},
+    "M.2": {"M.2", "PCIE", "SSD"},
+    "PCIE": {"PCIE", "M.2", "SSD"},
+    "SSD": {"SSD"},
+    "SATA": {"SATA", "SSD"},
+    "HDD": {"HDD"},
+}
+_PSU_CERT_ALIASES = {
+    "BRONZE": ("銅牌", "BRONZE"),
+    "SILVER": ("銀牌", "SILVER"),
+    "GOLD": ("金牌", "GOLD"),
+    "PLATINUM": ("白金", "PLATINUM"),
+}
+_CASE_FORM_FACTORS = {
+    "E-ATX": ("E-ATX",),
+    "ATX": ("ATX",),
+    "M-ATX": ("M-ATX", "MATX", "MICRO ATX"),
+    "ITX": ("ITX",),
+}
+
+
+def _strip_query_noise(text: str | None) -> str:
+    """移除『查 / 幫我 / 價格』等自然語句噪音,保留識別性 token。"""
+    if not text:
+        return ""
+    out = unicodedata.normalize("NFKC", str(text))
+    for pattern in _QUERY_NOISE_PATTERNS:
+        out = re.sub(pattern, " ", out, flags=re.IGNORECASE)
+    out = re.sub(r"[，,。！？!?:：;；『』「」\[\]【】()（）]", " ", out)
+    out = re.sub(r"\s+", " ", out)
+    return out.strip()
+
+
+def _extract_capacity_tokens(text: str | None) -> list[str]:
+    tokens: list[str] = []
+    if not text:
+        return tokens
+    up = unicodedata.normalize("NFKC", str(text)).upper()
+    for tb in re.findall(r"(\d{1,2})\s*TB", up):
+        token = f"{int(tb)}TB"
+        if token not in tokens:
+            tokens.append(token)
+    for gb in re.findall(r"(\d{2,4})\s*GB", up):
+        token = f"{int(gb)}GB"
+        if token not in tokens:
+            tokens.append(token)
+    for g in re.findall(r"(\d{2,4})\s*G\b", up):
+        token = f"{int(g)}GB"
+        if token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _capacity_to_gb(token: str | None) -> int | None:
+    if not token:
+        return None
+    up = str(token).upper().strip()
+    if up.endswith("TB"):
+        try:
+            return int(float(up[:-2]) * 1000)
+        except ValueError:
+            return None
+    if up.endswith("GB"):
+        try:
+            return int(float(up[:-2]))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_numeric_tokens(text: str | None, pattern: str) -> list[int]:
+    nums: list[int] = []
+    if not text:
+        return nums
+    for m in re.findall(pattern, unicodedata.normalize("NFKC", str(text)).upper()):
+        try:
+            n = int(m)
+        except ValueError:
+            continue
+        if n not in nums:
+            nums.append(n)
+    return nums
+
+
+def _extract_psu_certs(text: str | None) -> list[str]:
+    certs: list[str] = []
+    if not text:
+        return certs
+    up = unicodedata.normalize("NFKC", str(text)).upper()
+    for canon, aliases in _PSU_CERT_ALIASES.items():
+        if any(alias.upper() in up for alias in aliases):
+            certs.append(canon)
+    return certs
+
+
+def _extract_case_form_factors(text: str | None) -> list[str]:
+    forms: list[str] = []
+    if not text:
+        return forms
+    up = unicodedata.normalize("NFKC", str(text)).upper()
+    if "E-ATX" in up:
+        forms.append("E-ATX")
+    if any(alias in up for alias in ("M-ATX", "MATX", "MICRO ATX")):
+        forms.append("M-ATX")
+    if "ITX" in up:
+        forms.append("ITX")
+    if re.search(r"(^|[^A-Z])ATX([^A-Z]|$)", up) and "M-ATX" not in forms and "E-ATX" not in forms:
+        forms.append("ATX")
+    return forms
+
+
+def _extract_storage_types(text: str | None) -> list[str]:
+    types: list[str] = []
+    if not text:
+        return types
+    up = unicodedata.normalize("NFKC", str(text)).upper()
+    has_samsung = "SAMSUNG" in up or "三星" in up
+    has_990_family = bool(re.search(r"\b(970|980|990)\b", up))
+    if any(tok in up for tok in ("NVME", "M.2", "PCIE", "GEN4", "GEN5", "GEN3", "固態")):
+        types.extend(["NVME", "M.2", "PCIE", "SSD"])
+    if has_samsung and has_990_family:
+        types.extend(["NVME", "M.2", "PCIE", "SSD"])
+    if "SSD" in up:
+        types.append("SSD")
+    if has_samsung and any(tok in up for tok in ("EVO", "QVO", "990", "980", "970")):
+        types.append("SSD")
+    if "SATA" in up:
+        types.extend(["SATA", "SSD"])
+    if any(tok in up for tok in ("HDD", "5400轉", "7200轉", "機械", "硬碟")):
+        types.append("HDD")
+    dedup: list[str] = []
+    for t in types:
+        if t not in dedup:
+            dedup.append(t)
+    return dedup
+
+
+def _extract_cooler_kinds(text: str | None) -> list[str]:
+    kinds: list[str] = []
+    if not text:
+        return kinds
+    up = unicodedata.normalize("NFKC", str(text)).upper()
+    if any(tok in up for tok in ("水冷", "AIO")):
+        kinds.append("AIO")
+    if any(tok in up for tok in ("塔散", "雙塔", "單塔")):
+        kinds.extend(["AIR", "TOWER"])
+    elif "下吹" in up:
+        kinds.extend(["AIR", "TOPDOWN"])
+    elif "空冷" in up or "散熱器" in up:
+        kinds.append("AIR")
+    dedup: list[str] = []
+    for k in kinds:
+        if k not in dedup:
+            dedup.append(k)
+    return dedup
+
+
+def _extract_gpu_context(text: str | None) -> dict[str, Any]:
+    out = {"families": [], "numbers": [], "suffixes": []}
+    if not text:
+        return out
+    up = unicodedata.normalize("NFKC", str(text)).upper()
+    families: list[str] = []
+    numbers: list[int] = []
+    suffixes: list[str] = []
+    for fam in ("RTX", "GTX", "RX", "ARC"):
+        if fam in up:
+            families.append(fam)
+    for fam, num, suffix in re.findall(r"\b(RTX|GTX|RX)\s*([0-9]{4})\s*(TI|SUPER|XT|GRE)?", up):
+        if fam not in families:
+            families.append(fam)
+        n = int(num)
+        if n not in numbers:
+            numbers.append(n)
+        if suffix and suffix not in suffixes:
+            suffixes.append(suffix)
+    for fam, num in re.findall(r"\b(ARC)\s*([A-Z]?\d{3})\b", up):
+        if fam not in families:
+            families.append(fam)
+        key = int(re.sub(r"[^0-9]", "", num) or 0)
+        if key and key not in numbers:
+            numbers.append(key)
+    return {"families": families, "numbers": numbers, "suffixes": suffixes}
+
+
+def _extract_cpu_context(text: str | None) -> dict[str, Any]:
+    out = {"brands": [], "families": [], "suffixes": []}
+    if not text:
+        return out
+    up = unicodedata.normalize("NFKC", str(text)).upper()
+    brands: list[str] = []
+    families: list[str] = []
+    suffixes: list[str] = []
+    if re.search(r"\bRYZEN\b|\bR[3579]\s?\d{3,4}[A-Z0-9]*\b", up):
+        brands.append("AMD")
+    if re.search(r"\bINTEL\b|\bI[3579][-\s]?\d{4,5}[A-Z]*\b|\bULTRA\s?\d{3}\b|\bCORE\s+ULTRA\b", up):
+        brands.append("INTEL")
+    for m in re.findall(r"\b(R[3579]\s?\d{3,4}[A-Z0-9]*)", up):
+        fam = re.sub(r"\s+", "", m)
+        if fam not in families:
+            families.append(fam)
+    for m in re.findall(r"\b(I[3579][-\s]?\d{4,5}[A-Z]*)", up):
+        fam = re.sub(r"\s+", "", m)
+        if fam not in families:
+            families.append(fam)
+    for m in re.findall(r"\b(ULTRA\s?\d{3}[A-Z]?)", up):
+        fam = re.sub(r"\s+", "", m)
+        if fam not in families:
+            families.append(fam)
+    for suffix in ("X3D", "KF", "K", "F", "G", "GT"):
+        if re.search(rf"[0-9]{suffix}\b", up) and suffix not in suffixes:
+            suffixes.append(suffix)
+    return {"brands": brands, "families": families, "suffixes": suffixes}
+
+
+def _query_products_by_keyword_tokens(
+    *,
+    keyword_tokens: list[str],
+    category: str | None = None,
+    source: str | None = None,
+    max_price: int | None = None,
+    min_price: int | None = None,
+    limit: int = 20,
+    db_path: str = DEFAULT_DB_PATH,
+) -> list[dict]:
+    """依多個 keyword token 查商品;每個 token 都必須命中同一筆商品的任一文字欄位。"""
+    conn = _connect(db_path)
+    try:
+        _ensure_schema(conn)
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        for token in keyword_tokens:
+            tok = (token or "").strip()
+            if not tok:
+                continue
+            kw = f"%{tok.lower()}%"
+            clauses.append(
+                "(lower(product_name) LIKE ? OR lower(brand) LIKE ? "
+                "OR lower(model) LIKE ? OR lower(COALESCE(specs, '')) LIKE ?)"
+            )
+            params.extend([kw, kw, kw, kw])
+
+        if category:
+            clauses.append("lower(category) = ?")
+            params.append(category.lower())
+
+        if source:
+            clauses.append("lower(source) = ?")
+            params.append(source.lower())
+
+        if max_price is not None:
+            clauses.append("price IS NOT NULL AND price <= ?")
+            params.append(int(max_price))
+
+        if min_price is not None:
+            clauses.append("price IS NOT NULL AND price >= ?")
+            params.append(int(min_price))
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = (
+            f"SELECT {_PRODUCT_COLUMNS} FROM products {where} "
+            "ORDER BY (price IS NULL), price ASC LIMIT ?"
+        )
+        params.append(int(limit))
+        rows = conn.execute(sql, params).fetchall()
+        return [_row_to_dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _infer_search_category(keyword: str | None, category: str | None) -> str | None:
+    """從既有 category 或 query 文字推斷商品類別。"""
+    canon = _canonical_category(category)
+    if canon:
+        return canon
+    raw = unicodedata.normalize("NFKC", str(keyword or ""))
+    text = raw.lower()
+    for alias, mapped in _CATEGORY_ALIASES.items():
+        if alias in text:
+            return mapped
+    up = raw.upper()
+    if _extract_cpu_context(up)["brands"] or re.search(r"(R[3579]|I[3579])|ULTRA\s?\d", up):
+        return "CPU"
+    if _extract_gpu_context(up)["families"]:
+        return "GPU"
+    if re.search(r"DDR[345]", up) or (re.search(r"(3200|3600|4800|5200|5600|6000|6200|6400|6800|7200)", up) and any(tok.endswith("GB") for tok in _extract_capacity_tokens(up))):
+        return "RAM"
+    if _extract_storage_types(up) or _extract_capacity_tokens(up) and any(tok in up for tok in ("SSD", "HDD", "NVME", "M.2", "PCIE", "SATA", "GEN4", "GEN5")):
+        return "Storage"
+    if _extract_psu_certs(up) or re.search(r"\d{3,4}\s*W", up):
+        return "PSU"
+    if _extract_case_form_factors(up):
+        return "Case"
+    if _extract_cooler_kinds(up) or re.search(r"(120|140|240|280|360|420)", up):
+        return "Cooler"
+    return None
+
+
+def _extract_search_context(keyword: str | None, category: str | None = None) -> dict[str, Any]:
+    """從 query 抽出品牌 / 型號 / 規格 token,供 category-aware fallback 使用。"""
+    raw = str(keyword or "").strip()
+    cleaned = _strip_query_noise(raw)
+    up = unicodedata.normalize("NFKC", cleaned or raw).upper()
+    inferred_category = _infer_search_category(raw, category)
+
+    brands: list[str] = []
+    seen_brands: set[str] = set()
+    for alias, canon in _BRAND_ALIASES.items():
+        if alias in up and canon not in seen_brands:
+            brands.append(canon)
+            seen_brands.add(canon)
+
+    cpu_ctx = _extract_cpu_context(up if inferred_category in ("CPU", None) else "")
+    for brand in cpu_ctx["brands"]:
+        if brand not in seen_brands:
+            brands.append(brand)
+            seen_brands.add(brand)
+
+    strong_series: list[str] = []
+    for item in _SEARCH_SERIES_KEYWORDS:
+        if item in up:
+            strong_series.append(item)
+
+    chipsets: list[str] = []
+    if inferred_category == "Motherboard" or inferred_category is None:
+        for match in _pr._MB_CHIPSET_RE.findall(up):
+            chip = match.upper()
+            if chip not in chipsets:
+                chipsets.append(chip)
+
+    memory_generation: list[str] = []
+    for match in re.findall(r"DDR[345]", up):
+        if match not in memory_generation:
+            memory_generation.append(match)
+    if re.search(r"D5", up) and "DDR5" not in memory_generation:
+        memory_generation.append("DDR5")
+    if re.search(r"D4", up) and "DDR4" not in memory_generation:
+        memory_generation.append("DDR4")
+
+    sockets: list[str] = []
+    for sock in _SOCKET_KEYWORDS:
+        if sock in up:
+            sockets.append(sock)
+
+    capacities = _extract_capacity_tokens(up)
+    ram_capacities = capacities if inferred_category == "RAM" else []
+    storage_capacities = capacities if inferred_category == "Storage" else []
+    ram_speeds = _extract_numeric_tokens(up if inferred_category in ("RAM", None) else "", r"\b(3200|3600|4800|5200|5600|6000|6200|6400|6800|7200)\b")
+    psu_wattages = _extract_numeric_tokens(up if inferred_category in ("PSU", None) else "", r"\b(350|400|450|500|550|600|650|700|750|800|850|1000|1200|1300)\s*W\b")
+    psu_certs = _extract_psu_certs(up if inferred_category in ("PSU", None) else "")
+    case_form_factors = _extract_case_form_factors(up if inferred_category in ("Case", None) else "")
+    cooler_kinds = _extract_cooler_kinds(up if inferred_category in ("Cooler", None) else "")
+    cooler_radiators = _extract_numeric_tokens(up if inferred_category in ("Cooler", None) else "", r"\b(120|140|240|280|360|420)\b")
+    storage_types = _extract_storage_types(up if inferred_category in ("Storage", None) else "")
+    gpu_ctx = _extract_gpu_context(up if inferred_category in ("GPU", None) else "")
+
+    unknown_model_tokens = []
+    for token in re.findall(r"\b[A-Z0-9.-]{3,}\b", up):
+        if token in _WEAK_TOKEN_WORDS:
+            continue
+        if token.startswith("DDR") or token.endswith("GB") or token.endswith("TB"):
+            continue
+        if token in strong_series:
+            continue
+        if token in ("ATX", "M-ATX", "ITX", "E-ATX", "SSD", "HDD", "NVME", "PCIE"):
+            continue
+        if re.fullmatch(r"\d+", token):
+            continue
+        unknown_model_tokens.append(token)
+    dedup_unknown: list[str] = []
+    for token in unknown_model_tokens:
+        if token not in dedup_unknown:
+            dedup_unknown.append(token)
+
+    return {
+        "raw_query": raw,
+        "cleaned_query": cleaned,
+        "category": inferred_category,
+        "brands": brands,
+        "series": strong_series,
+        "chipsets": chipsets,
+        "memory_generation": memory_generation,
+        "sockets": sockets,
+        "ram_capacities": ram_capacities,
+        "ram_speeds": ram_speeds,
+        "storage_capacities": storage_capacities,
+        "storage_types": storage_types,
+        "psu_wattages": psu_wattages,
+        "psu_certifications": psu_certs,
+        "case_form_factors": case_form_factors,
+        "cooler_kinds": cooler_kinds,
+        "cooler_radiators": cooler_radiators,
+        "gpu_families": gpu_ctx["families"],
+        "gpu_numbers": gpu_ctx["numbers"],
+        "gpu_suffixes": gpu_ctx["suffixes"],
+        "cpu_families": cpu_ctx["families"],
+        "cpu_suffixes": cpu_ctx["suffixes"],
+        "unknown_model_tokens": dedup_unknown,
+    }
+
+
+def _gpu_number_from_text(value: str | None) -> int | None:
+    if not value:
+        return None
+    m = re.search(r"(?:RTX|GTX|RX)\s*([0-9]{4})", unicodedata.normalize("NFKC", str(value)).upper())
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _gpu_suffixes_from_text(value: str | None) -> list[str]:
+    if not value:
+        return []
+    up = unicodedata.normalize("NFKC", str(value)).upper()
+    out: list[str] = []
+    for suffix in ("TI", "SUPER", "XT", "GRE"):
+        if suffix in up and suffix not in out:
+            out.append(suffix)
+    return out
+
+
+def _cpu_family_tokens(value: str | None) -> list[str]:
+    if not value:
+        return []
+    up = unicodedata.normalize("NFKC", str(value)).upper()
+    out: list[str] = []
+    for m in re.findall(r"\b(R[3579]\s?\d{3,4}[A-Z0-9]*)", up):
+        fam = re.sub(r"\s+", "", m)
+        if fam not in out:
+            out.append(fam)
+    for m in re.findall(r"\b(I[3579][-\s]?\d{4,5}[A-Z]*)", up):
+        fam = re.sub(r"\s+", "", m)
+        if fam not in out:
+            out.append(fam)
+    for m in re.findall(r"\b(ULTRA\s?\d)", up):
+        fam = re.sub(r"\s+", "", m)
+        if fam not in out:
+            out.append(fam)
+    return out
+
+
+def _cpu_suffix_tokens(value: str | None) -> list[str]:
+    if not value:
+        return []
+    up = unicodedata.normalize("NFKC", str(value)).upper()
+    out: list[str] = []
+    for suffix in ("X3D", "KF", "K", "F", "G", "GT"):
+        if suffix in up and suffix not in out:
+            out.append(suffix)
+    return out
+
+
+def _product_search_tokens(product: dict, category: str | None) -> set[str]:
+    """抽出商品自身可供 fallback 比對的 token。"""
+    pname = product.get("product_name") or ""
+    sp = _specs_of(product)
+    tokens = set(_key_tokens(pname, category))
+    text = unicodedata.normalize("NFKC", pname).upper()
+
+    brand = (product.get("brand") or "").upper()
+    if brand:
+        tokens.add("BRAND:" + brand)
+
+    for item in _SEARCH_SERIES_KEYWORDS:
+        if item in text:
+            tokens.add("SERIES:" + item)
+
+    chipset = (sp.get("chipset") or product.get("model") or "").upper()
+    if chipset:
+        if chipset.endswith("E") and chipset[:4].isalnum():
+            tokens.add("CHIP:" + chipset.rstrip("E")[:4])
+        tokens.add("CHIP:" + chipset)
+
+    mem = (sp.get("memory_generation") or "").upper()
+    if mem in ("DDR3", "DDR4", "DDR5"):
+        tokens.add("MEM:" + mem)
+
+    socket = (sp.get("socket") or "").upper()
+    if socket:
+        tokens.add("SOCKET:" + socket)
+
+    if category == "RAM":
+        for cap in _extract_capacity_tokens(sp.get("capacity") or pname):
+            tokens.add("CAP:" + cap)
+        speed = sp.get("speed")
+        if isinstance(speed, int):
+            tokens.add(f"SPD:{speed}")
+        for num in _extract_numeric_tokens(pname, r"\b(3200|3600|4800|5200|5600|6000|6200|6400|6800|7200)\b"):
+            tokens.add(f"SPD:{num}")
+
+    if category == "Storage":
+        for cap in _extract_capacity_tokens(sp.get("capacity") or pname):
+            tokens.add("STOCAP:" + cap)
+        for stype in _extract_storage_types((sp.get("interface") or "") + " " + (sp.get("form_factor") or "") + " " + pname):
+            tokens.add("STYPE:" + stype)
+        if _is_ssd_storage(product):
+            tokens.add("STYPE:SSD")
+        else:
+            tokens.add("STYPE:HDD")
+
+    if category == "PSU":
+        watt = sp.get("wattage")
+        if isinstance(watt, int):
+            tokens.add(f"WATT:{watt}")
+        cert = (sp.get("certification") or "").upper()
+        if cert in _PSU_CERT_ALIASES:
+            tokens.add("EFF:" + cert)
+        for cert in _extract_psu_certs(pname):
+            tokens.add("EFF:" + cert)
+
+    if category == "Case":
+        for ff in _extract_case_form_factors((sp.get("case_size") or "") + " " + pname):
+            tokens.add("FORM:" + ff)
+
+    if category == "Cooler":
+        kind_source = (sp.get("cooler_type") or "") + " " + pname
+        for kind in _extract_cooler_kinds(kind_source):
+            tokens.add("COOL:" + kind)
+        if any(tok in text for tok in ("塔", "雙塔", "單塔")):
+            tokens.add("COOL:TOWER")
+        if "下吹" in text:
+            tokens.add("COOL:TOPDOWN")
+        for rad in _extract_numeric_tokens(pname, r"\b(120|140|240|280|360|420)\b"):
+            tokens.add(f"RAD:{rad}")
+
+    if category == "GPU":
+        gpu_text = (product.get("model") or "") + " " + pname
+        for fam in _extract_gpu_context(gpu_text)["families"]:
+            tokens.add("GPUFAM:" + fam)
+        num = _gpu_number_from_text(gpu_text)
+        if num is not None:
+            tokens.add(f"GPUNUM:{num}")
+        for suffix in _gpu_suffixes_from_text(gpu_text):
+            tokens.add("GPUSFX:" + suffix)
+
+    if category == "CPU":
+        cpu_text = (product.get("model") or "") + " " + pname
+        for fam in _cpu_family_tokens(cpu_text):
+            tokens.add("CPUFAM:" + fam)
+        for suffix in _cpu_suffix_tokens(cpu_text):
+            tokens.add("CPUSFX:" + suffix)
+
+    return tokens
+
+
+def _filter_products_by_context(products: list[dict], context: dict[str, Any]) -> list[dict]:
+    """用 query 抽出的 token 再過濾一次候選,避免明顯不相近的商品混入。"""
+    category = context.get("category")
+    wanted_mem = {f"MEM:{m}" for m in context.get("memory_generation") or []}
+    wanted_socket = {f"SOCKET:{s}" for s in context.get("sockets") or []}
+    wanted_chip = set()
+    for chip in context.get("chipsets") or []:
+        wanted_chip.add("CHIP:" + chip)
+        if chip.endswith("E") and chip[:4].isalnum():
+            wanted_chip.add("CHIP:" + chip.rstrip("E")[:4])
+
+    out: list[dict] = []
+    for item in products:
+        ptokens = _product_search_tokens(item, category)
+        if wanted_chip and not (ptokens & wanted_chip):
+            continue
+        if category == "Motherboard":
+            if wanted_mem and not (ptokens & wanted_mem):
+                continue
+            if wanted_socket and not (ptokens & wanted_socket):
+                continue
+        elif category == "RAM":
+            if wanted_mem and not (ptokens & wanted_mem):
+                continue
+        elif category == "Storage":
+            storage_types = set(context.get("storage_types") or [])
+            if {"NVME", "M.2", "PCIE"} & storage_types and not any(t in ptokens for t in ("STYPE:NVME", "STYPE:M.2", "STYPE:PCIE")):
+                continue
+            if "SSD" in storage_types and "STYPE:SSD" not in ptokens:
+                continue
+            if "HDD" in storage_types and "STYPE:HDD" not in ptokens:
+                continue
+        elif category == "Case":
+            forms = {"FORM:" + ff for ff in context.get("case_form_factors") or []}
+            if forms and not (ptokens & forms):
+                continue
+        elif category == "Cooler":
+            kinds = {"COOL:" + kind for kind in context.get("cooler_kinds") or []}
+            if "COOL:AIO" in kinds and "COOL:AIO" not in ptokens:
+                continue
+            if "COOL:AIR" in kinds and "COOL:AIO" in ptokens and "COOL:AIR" not in ptokens:
+                continue
+        elif category == "GPU":
+            fams = {"GPUFAM:" + fam for fam in context.get("gpu_families") or []}
+            if fams and not (ptokens & fams):
+                continue
+        elif category == "CPU":
+            cpu_brands = {"BRAND:" + b for b in context.get("brands") or [] if b in ("AMD", "INTEL")}
+            if cpu_brands and not (ptokens & cpu_brands):
+                continue
+        elif category == "PSU":
+            pass
+        out.append(item)
+
+    return out or products
+
+
+def _dedupe_products_by_identity(products: list[dict]) -> list[dict]:
+    """依 source + product_name 去重,保留先出現(通常價格較低)者。"""
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for item in products:
+        key = (
+            (item.get("source") or "").strip().lower(),
+            (item.get("product_name") or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _build_fallback_search_plans(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """依 query token 建立放寬查詢策略。"""
+    category = context.get("category")
+    brands = context.get("brands") or []
+    series = context.get("series") or []
+    chipsets = context.get("chipsets") or []
+    mems = context.get("memory_generation") or []
+    sockets = context.get("sockets") or []
+    plans: list[dict[str, Any]] = []
+
+    def add(label: str, tokens: list[str], plan_category: str | None = category) -> None:
+        clean = [t for t in tokens if t]
+        if not clean:
+            return
+        plan = {"label": label, "tokens": clean, "category": plan_category}
+        if plan not in plans:
+            plans.append(plan)
+
+    if category == "Motherboard":
+        for chip in chipsets:
+            for brand in brands:
+                add("brand + chipset", [brand, chip], "Motherboard")
+            for item in series:
+                add("series + chipset", [item, chip], "Motherboard")
+            for mem in mems:
+                add("chipset + memory_generation", [chip, mem], "Motherboard")
+            add("chipset + category", [chip], "Motherboard")
+    elif category == "RAM":
+        for mem in mems:
+            for cap in context.get("ram_capacities") or []:
+                add("ram generation + capacity", [mem, cap], "RAM")
+            for speed in context.get("ram_speeds") or []:
+                add("ram generation + speed", [mem, str(speed)], "RAM")
+            add("ram generation", [mem], "RAM")
+    elif category == "Storage":
+        storage_types = context.get("storage_types") or []
+        for cap in context.get("storage_capacities") or []:
+            for stype in storage_types:
+                for token in _STORAGE_TYPE_ALIASES.get(stype, {stype}):
+                    add("storage capacity + type", [cap, token], "Storage")
+            if not storage_types:
+                add("storage capacity", [cap], "Storage")
+        for stype in storage_types:
+            for token in _STORAGE_TYPE_ALIASES.get(stype, {stype}):
+                add("storage type", [token], "Storage")
+    elif category == "PSU":
+        for watt in context.get("psu_wattages") or []:
+            for cert in context.get("psu_certifications") or []:
+                cert_alias = _PSU_CERT_ALIASES.get(cert, (cert,))
+                add("psu wattage + cert", [f"{watt}W", cert_alias[0]], "PSU")
+            add("psu wattage", [f"{watt}W"], "PSU")
+        for cert in context.get("psu_certifications") or []:
+            cert_alias = _PSU_CERT_ALIASES.get(cert, (cert,))
+            add("psu cert", [cert_alias[0]], "PSU")
+    elif category == "Case":
+        for ff in context.get("case_form_factors") or []:
+            aliases = _CASE_FORM_FACTORS.get(ff, (ff,))
+            add("case form factor", [aliases[0]], "Case")
+    elif category == "Cooler":
+        for kind in context.get("cooler_kinds") or []:
+            base = "水冷" if kind == "AIO" else ("下吹" if kind == "TOPDOWN" else "塔散")
+            for rad in context.get("cooler_radiators") or []:
+                add("cooler kind + size", [str(rad), base], "Cooler")
+            add("cooler kind", [base], "Cooler")
+        for rad in context.get("cooler_radiators") or []:
+            add("cooler size", [str(rad)], "Cooler")
+    elif category == "GPU":
+        for fam in context.get("gpu_families") or []:
+            for num in context.get("gpu_numbers") or []:
+                add("gpu family + model", [fam, str(num)], "GPU")
+            add("gpu family", [fam], "GPU")
+        for brand in brands:
+            for fam in context.get("gpu_families") or []:
+                add("gpu brand + family", [brand, fam], "GPU")
+    elif category == "CPU":
+        for brand in brands:
+            add("cpu brand", [brand], "CPU")
+        for fam in context.get("cpu_families") or []:
+            add("cpu family", [fam], "CPU")
+    else:
+        for brand in brands:
+            add("brand + category", [brand], category)
+        for item in series:
+            add("series", [item], category)
+        for mem in mems:
+            add("memory_generation", [mem], category)
+        for sock in sockets:
+            add("platform", [sock], category)
+
+    allow_model_token = bool(category or _has_strong_fallback_anchor(category, context))
+    if allow_model_token:
+        for token in context.get("unknown_model_tokens") or []:
+            add("model token", [token], category)
+    return plans
+
+
+def _shared_match_identity(items: list[dict], category: str | None) -> str | None:
+    if not items:
+        return None
+    values = set()
+    for item in items:
+        if category in ("CPU", "GPU", "Motherboard"):
+            mk = _normalize_model_key(item.get("model") or "") or _normalize_model_key(item.get("product_name") or "")
+            if mk:
+                values.add(mk)
+                continue
+        values.add(_norm_full(item.get("product_name") or ""))
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _has_strong_fallback_anchor(category: str | None, context: dict[str, Any]) -> bool:
+    if category == "Motherboard":
+        return bool(context.get("chipsets") or context.get("series") or context.get("brands") or context.get("memory_generation") or context.get("sockets"))
+    if category == "CPU":
+        return bool(context.get("brands") or context.get("cpu_families"))
+    if category == "GPU":
+        return bool(context.get("gpu_families") or context.get("gpu_numbers") or context.get("brands"))
+    if category == "RAM":
+        return bool(context.get("memory_generation") or context.get("ram_capacities") or context.get("ram_speeds"))
+    if category == "Storage":
+        return bool(context.get("storage_capacities") or context.get("storage_types") or context.get("brands"))
+    if category == "PSU":
+        return bool(context.get("psu_wattages") or context.get("psu_certifications"))
+    if category == "Case":
+        return bool(context.get("case_form_factors") or context.get("brands"))
+    if category == "Cooler":
+        return bool(context.get("cooler_kinds") or context.get("cooler_radiators") or context.get("brands"))
+    return False
+
+
+def _fallback_rank(item: dict, context: dict[str, Any], category: str | None) -> tuple[int, int, int]:
+    ptokens = _product_search_tokens(item, category)
+    score = 0
+    if category == "Motherboard":
+        wanted_brand = {f"BRAND:{b}" for b in context.get("brands") or []}
+        wanted_series = {f"SERIES:{s}" for s in context.get("series") or []}
+        wanted_mem = {f"MEM:{m}" for m in context.get("memory_generation") or []}
+        wanted_socket = {f"SOCKET:{s}" for s in context.get("sockets") or []}
+        wanted_chip = {"CHIP:" + c for c in context.get("chipsets") or []}
+        score += len(ptokens & wanted_chip) * 12
+        score += len(ptokens & wanted_series) * 10
+        score += len(ptokens & wanted_brand) * 8
+        score += len(ptokens & wanted_mem) * 7
+        score += len(ptokens & wanted_socket) * 6
+    elif category == "RAM":
+        wanted_mem = {f"MEM:{m}" for m in context.get("memory_generation") or []}
+        score += len(ptokens & wanted_mem) * 30
+        qcaps = [_capacity_to_gb(x) for x in context.get("ram_capacities") or []]
+        qcaps = [x for x in qcaps if x is not None]
+        caps = [_capacity_to_gb(t.split(":", 1)[1]) for t in ptokens if t.startswith("CAP:")]
+        caps = [x for x in caps if x is not None]
+        if qcaps and caps:
+            diff = min(abs(c - qcaps[0]) for c in caps)
+            score += max(0, 24 - diff)
+            if diff == 0:
+                score += 20
+        qspeeds = context.get("ram_speeds") or []
+        cspeeds = [int(t.split(":", 1)[1]) for t in ptokens if t.startswith("SPD:")]
+        if qspeeds and cspeeds:
+            diff = min(abs(c - qspeeds[0]) for c in cspeeds)
+            score += max(0, 18 - diff // 80)
+            if diff == 0:
+                score += 12
+    elif category == "Storage":
+        wanted_types = {"STYPE:" + t for t in context.get("storage_types") or []}
+        score += len(ptokens & wanted_types) * 32
+        qcaps = [_capacity_to_gb(x) for x in context.get("storage_capacities") or []]
+        qcaps = [x for x in qcaps if x is not None]
+        caps = [_capacity_to_gb(t.split(":", 1)[1]) for t in ptokens if t.startswith("STOCAP:")]
+        caps = [x for x in caps if x is not None]
+        if qcaps and caps:
+            diff = min(abs(c - qcaps[0]) for c in caps)
+            score += max(0, 18 - diff // 60)
+            if diff == 0:
+                score += 10
+        wanted_brand = {f"BRAND:{b}" for b in context.get("brands") or []}
+        score += len(ptokens & wanted_brand) * 10
+    elif category == "PSU":
+        qwatts = context.get("psu_wattages") or []
+        cwatts = [int(t.split(":", 1)[1]) for t in ptokens if t.startswith("WATT:")]
+        if qwatts and cwatts:
+            diff = min(abs(c - qwatts[0]) for c in cwatts)
+            score += max(0, 25 - diff // 25)
+            if diff == 0:
+                score += 18
+        wanted_eff = {"EFF:" + e for e in context.get("psu_certifications") or []}
+        score += len(ptokens & wanted_eff) * 18
+    elif category == "Case":
+        wanted_forms = {"FORM:" + ff for ff in context.get("case_form_factors") or []}
+        score += len(ptokens & wanted_forms) * 25
+    elif category == "Cooler":
+        wanted_kinds = {"COOL:" + k for k in context.get("cooler_kinds") or []}
+        score += len(ptokens & wanted_kinds) * 24
+        if "COOL:TOWER" in wanted_kinds:
+            score += 10 if "COOL:TOWER" in ptokens else -5
+        if "COOL:TOPDOWN" in wanted_kinds:
+            score += 8 if "COOL:TOPDOWN" in ptokens else 0
+        qrads = context.get("cooler_radiators") or []
+        crads = [int(t.split(":", 1)[1]) for t in ptokens if t.startswith("RAD:")]
+        if qrads and crads:
+            diff = min(abs(c - qrads[0]) for c in crads)
+            score += max(0, 18 - diff // 20)
+            if diff == 0:
+                score += 12
+    elif category == "GPU":
+        wanted_fams = {"GPUFAM:" + fam for fam in context.get("gpu_families") or []}
+        score += len(ptokens & wanted_fams) * 28
+        qnums = context.get("gpu_numbers") or []
+        cnums = [int(t.split(":", 1)[1]) for t in ptokens if t.startswith("GPUNUM:")]
+        if qnums and cnums:
+            diff = min(abs(c - qnums[0]) for c in cnums)
+            score += max(0, 26 - diff // 5)
+            if diff == 0:
+                score += 16
+        wanted_suffixes = {"GPUSFX:" + s for s in context.get("gpu_suffixes") or []}
+        score += len(ptokens & wanted_suffixes) * 8
+        wanted_brand = {f"BRAND:{b}" for b in context.get("brands") or []}
+        score += len(ptokens & wanted_brand) * 6
+    elif category == "CPU":
+        wanted_brand = {f"BRAND:{b}" for b in context.get("brands") or [] if b in ("AMD", "INTEL")}
+        score += len(ptokens & wanted_brand) * 18
+        wanted_fams = {"CPUFAM:" + fam for fam in context.get("cpu_families") or []}
+        score += len(ptokens & wanted_fams) * 16
+        wanted_suffixes = {"CPUSFX:" + s for s in context.get("cpu_suffixes") or []}
+        score += len(ptokens & wanted_suffixes) * 6
+    else:
+        wanted_brand = {f"BRAND:{b}" for b in context.get("brands") or []}
+        score += len(ptokens & wanted_brand) * 8
+    price = item.get("price")
+    return (-score, price is None, price or 0)
+
+
+def _maybe_get_high_confidence_products(
+    scored_exact: list[tuple[int, str | None, dict]],
+    context: dict[str, Any],
+    category: str | None,
+    limit: int,
+) -> dict[str, Any] | None:
+    if not scored_exact:
+        return None
+    best_score, best_level, _ = scored_exact[0]
+    if best_level not in (_HIGH_CONFIDENCE_LEVELS | {"normalized-substr"}):
+        return None
+    top = [item for score, level, item in scored_exact if score == best_score and level == best_level]
+    shared = _shared_match_identity(top, category)
+    if not shared:
+        return None
+    if category == "RAM":
+        return None
+    high_confidence_products = _dedupe_products_by_identity(top)[: int(limit)]
+    return {
+        "query": context.get("raw_query"),
+        "category": category,
+        "exact_match": True,
+        "high_confidence_match": True,
+        "fallback_used": False,
+        "warning": None,
+        "matched_strategy": best_level,
+        "products": high_confidence_products,
+        "inferred_tokens": context,
+    }
+
+
+def search_products_with_fallback(
+    keyword: str,
+    category: str | None = None,
+    source: str | None = None,
+    max_price: int | None = None,
+    min_price: int | None = None,
+    limit: int = 20,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    """先做精確查詢,查不到再以品牌/系列/chipset/socket 等 token 放寬找相近商品。"""
+    effective_category = _infer_search_category(keyword, category)
+    context = _extract_search_context(keyword, effective_category)
+    cleaned_keyword = context.get("cleaned_query") or str(keyword).strip()
+    exact_candidates = query_products(
+        keyword=cleaned_keyword,
+        category=effective_category,
+        source=source,
+        max_price=max_price,
+        min_price=min_price,
+        limit=max(int(limit) * 4, 40),
+        db_path=db_path,
+    )
+    if cleaned_keyword != str(keyword).strip():
+        extra = query_products(
+            keyword=str(keyword).strip(),
+            category=effective_category,
+            source=source,
+            max_price=max_price,
+            min_price=min_price,
+            limit=max(int(limit) * 2, 20),
+            db_path=db_path,
+        )
+        exact_candidates = _dedupe_products_by_identity(exact_candidates + extra)
+
+    qn = cleaned_keyword
+    qfull = _norm_full(qn)
+    qkey = _normalize_model_key(qn)
+    qtokens = _key_tokens(qn, effective_category)
+
+    scored_exact: list[tuple[int, str | None, dict]] = []
+    for item in exact_candidates:
+        score, level = _score_candidate(qn, qfull, qkey, qtokens, item, effective_category)
+        if score > 0 and level:
+            scored_exact.append((score, level, item))
+    scored_exact.sort(key=lambda x: (-x[0], x[2].get("price") is None, x[2].get("price") or 0))
+
+    high_confidence = [item for _, level, item in scored_exact if level in _EXACT_MATCH_LEVELS]
+    if high_confidence:
+        exact_products = _dedupe_products_by_identity(high_confidence)[: int(limit)]
+        return {
+            "query": keyword,
+            "category": effective_category,
+            "exact_match": True,
+            "high_confidence_match": False,
+            "fallback_used": False,
+            "warning": None,
+            "matched_strategy": "exact",
+            "inferred_tokens": context,
+            "products": exact_products,
+        }
+
+    hc = _maybe_get_high_confidence_products(scored_exact, context, effective_category, limit)
+    if hc is not None:
+        return hc
+
+    aggregated: list[dict] = []
+    matched_strategy: str | None = None
+    plans = _build_fallback_search_plans(context)
+    for plan in plans:
+        rows = _query_products_by_keyword_tokens(
+            keyword_tokens=plan["tokens"],
+            category=plan["category"],
+            source=source,
+            max_price=max_price,
+            min_price=min_price,
+            limit=max(int(limit) * 4, 40),
+            db_path=db_path,
+        )
+        rows = _filter_products_by_context(rows, context)
+        if rows and matched_strategy is None:
+            matched_strategy = plan["label"]
+        aggregated.extend(rows)
+        aggregated = _dedupe_products_by_identity(aggregated)
+        if len(aggregated) >= int(limit):
+            break
+
+    if effective_category and len(aggregated) < int(limit) and _has_strong_fallback_anchor(effective_category, context):
+        pool = query_products(
+            category=effective_category,
+            source=source,
+            max_price=max_price,
+            min_price=min_price,
+            limit=2000,
+            db_path=db_path,
+        )
+        pool = _filter_products_by_context(pool, context)
+        aggregated = _dedupe_products_by_identity(aggregated + pool)
+        if pool and matched_strategy is None:
+            matched_strategy = "category-aware ranking"
+
+    if aggregated:
+        aggregated = sorted(aggregated, key=lambda item: _fallback_rank(item, context, effective_category))
+
+    products = aggregated[: int(limit)]
+    if not products and scored_exact:
+        fuzzy_rows = [item for _, _, item in scored_exact]
+        products = _dedupe_products_by_identity(fuzzy_rows)[: int(limit)]
+        if products and matched_strategy is None:
+            matched_strategy = "partial keyword match"
+
+    warning = None
+    if products:
+        warning = f"沒有找到完全相同型號「{keyword}」的價格資料，以下是相近商品。"
+    else:
+        warning = (
+            f"沒有找到完全相同型號「{keyword}」的價格資料，且目前資料庫沒有足夠相近商品可供參考。"
+        )
+
+    return {
+        "query": keyword,
+        "category": effective_category,
+        "exact_match": False,
+        "high_confidence_match": False,
+        "fallback_used": True,
+        "warning": warning,
+        "matched_strategy": matched_strategy,
+        "inferred_tokens": context,
+        "products": products,
+    }
+
+
 def find_deals(
     keyword: str | None = None,
     category: str | None = None,
@@ -2034,6 +3065,7 @@ _BRAND_ALIASES = {
     "華碩": "ASUS", "ASUS": "ASUS", "技嘉": "GIGABYTE", "GIGABYTE": "GIGABYTE",
     "微星": "MSI", "MSI": "MSI", "華擎": "ASROCK", "ASROCK": "ASROCK",
     "AMD": "AMD", "INTEL": "INTEL", "RYZEN": "AMD",
+    "三星": "SAMSUNG", "SAMSUNG": "SAMSUNG",
 }
 
 
