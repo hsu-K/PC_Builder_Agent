@@ -31,10 +31,16 @@ from pc_builder_agent.tools import (
 )
 from pc_builder_agent.tools.ecommerce_db import (
     DEFAULT_DB_PATH,
+    _detect_use_case_from_text,
+    _extract_budget_from_text,
+    _infer_search_category,
     classify_ecommerce_mode,
     run_interactive_selection,
 )
-from pc_builder_agent.tools.ecommerce_tools import _no_data_message
+from pc_builder_agent.tools.ecommerce_tools import (
+    _no_data_message,
+    extract_structured_ecommerce_options,
+)
 
 
 def _build_ecommerce_system_prompt(db_path: str) -> str:
@@ -256,6 +262,53 @@ def _build_ecommerce_system_prompt(db_path: str) -> str:
     )
 
 
+def _looks_like_build_request(text: str | None) -> bool:
+    if not text:
+        return False
+    raw = str(text)
+    return any(token in raw for token in ("組", "菜單", "主機", "遊戲機", "電腦"))
+
+
+def _build_structured_options_for_request(request: str | None, db_path: str) -> dict[str, Any] | None:
+    text = str(request or "").strip()
+    if not text:
+        return None
+
+    guard = _no_data_message(db_path)
+    if guard:
+        return extract_structured_ecommerce_options(guard, query=text)
+
+    inferred_category = _infer_search_category(text, None)
+    if inferred_category:
+        result = search_ecommerce_products.invoke({
+            "keyword": text,
+            "category": inferred_category,
+            "db_path": db_path,
+        })
+        return extract_structured_ecommerce_options(
+            result,
+            query=text,
+            category=inferred_category,
+            mode="product_search",
+        )
+
+    budget = _extract_budget_from_text(text)
+    use_case = _detect_use_case_from_text(text)
+    if budget and use_case and _looks_like_build_request(text):
+        result = recommend_pc_build_tool.invoke({
+            "budget": budget,
+            "use_case": use_case,
+            "db_path": db_path,
+        })
+        return extract_structured_ecommerce_options(
+            result,
+            query=text,
+            mode="build_plan",
+        )
+
+    return None
+
+
 def ecommerce_node(
     state: dict,
     *,
@@ -298,6 +351,8 @@ def ecommerce_node(
         return updates
     """
 
+    ecommerce_options = _build_structured_options_for_request(state.get("request"), db_path)
+
     # ---- 其餘(完整菜單 / 價格 / 優惠 / 搭板 / 散熱器查詢…)維持 LLM tool-calling 路徑 ----
     ai_message, text = run_agent_turn(
         state=state,
@@ -317,4 +372,9 @@ def ecommerce_node(
         print("Ecommerce Node Advice:", text)
         print("===============================================================")
 
-    return {"messages": [ai_message], "ecommerce_advice": text}
+    return {
+        "messages": [ai_message],
+        "ecommerce_advice": text,
+        "final_answer": text,
+        "ecommerce_options": ecommerce_options,
+    }
