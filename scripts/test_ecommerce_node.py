@@ -131,4 +131,5 @@ def find_related_goods(good_list: list[str]):
 
 if __name__ == "__main__":
     # test_ecommerce_node_rtx5070()
-    find_related_goods(["RTX 5060Ti 16GB", "intel Core Ultra 7 270K", "華碩 PRIME Z890-P WIFI-CSM D5/ATX/3+1年保/LGA1851"])
+    # find_related_goods(["RTX 5060Ti 16GB", "intel Core Ultra 7 270K", "華碩 PRIME Z890-P WIFI-CSM D5/ATX/3+1年保/LGA1851", "ZOTAC RTX5080 SOLID CORE OC"])
+    find_related_goods(["INNO3D RTX5080 X3", "INNO3D RTX5080 X3 OC", "華碩 PRIME-RTX5080-16G", "微星 RTX5080 16G VENTUS 3X OC"])

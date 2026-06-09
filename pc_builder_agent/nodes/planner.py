@@ -22,6 +22,7 @@ def planner_node(
     ai_message, text = run_agent_turn(
         state=state,
         role_name="planner agent",
+        # 目前呼叫專家node太多，而每個專家node其實會把每個零件都跑過一次
         system_prompt=(
             "You are the planner for a PC building workflow.\n"
             "Your job is not to solve the user's problem.\n"

@@ -13,9 +13,11 @@ from pc_builder_agent.nodes.memory_specialist import memory_specialist_node
 from pc_builder_agent.nodes.storage_specialist import storage_specialist_node
 from pc_builder_agent.nodes.cooling_specialist import cooling_specialist_node
 from pc_builder_agent.nodes.integrator import integrator_node
+from pc_builder_agent.nodes.component_parser import component_parser_node
 from pc_builder_agent.nodes.base import run_agent_turn
 from pc_builder_agent.nodes.pc_board_scraper import pc_board_scraper_node
 from pc_builder_agent.nodes.ecommerce import ecommerce_node
+
 
 __all__ = [
     "planner_node",
@@ -26,6 +28,7 @@ __all__ = [
     "storage_specialist_node",
     "cooling_specialist_node",
     "integrator_node",
+    "component_parser_node",
     "run_agent_turn",
     "pc_board_scraper_node",
     "ecommerce_node",

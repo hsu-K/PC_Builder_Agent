@@ -28,6 +28,7 @@ from pc_builder_agent.nodes import (
     storage_specialist_node,
     cooling_specialist_node,
     integrator_node,
+    component_parser_node,
     pc_board_scraper_node,
     ecommerce_node,
 )
@@ -67,6 +68,7 @@ class BuildState(TypedDict, total=False):
         ecommerce_advice (str): Ecommerce Recommendation Specialist 的商品/優惠建議
         ecommerce_db_path (str): ecommerce 查詢使用的資料庫路徑(可選,主要供測試注入)
         final_answer (str): integrator 整合後的最終建議
+        parsed_components (dict): component_parser 從 final_answer 解析出的零件 JSON
 
         互動式選件 state(state-driven,跨 thread 多輪保留):
         selected_components (dict): {category: {product_name, price, source, socket, platform,
@@ -102,6 +104,8 @@ class BuildState(TypedDict, total=False):
     cooling_advice: str
     pc_board_response: str
     final_answer: str
+    
+    parsed_components: dict
     
     ecommerce_advice: str
     ecommerce_db_path: str
@@ -271,6 +275,10 @@ def build_graph(model_name: str | None = None, debug: bool = False):
             "integrator",
         ),
     )
+    graph.add_node(
+        "component_parser",
+        lambda state: component_parser_node(state, model_name=model_name, debug=debug),
+    )
 
     # 定義邊（流程連接）
     graph.add_edge(START, "planner")
@@ -283,7 +291,8 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_edge("memory_specialist", "router")
     graph.add_edge("storage_specialist", "router")
     graph.add_edge("cooling_specialist", "router")
-    graph.add_edge("integrator", END)
+    graph.add_edge("integrator", "component_parser")
+    graph.add_edge("component_parser", END)
 
     # 編譯工作流程圖
     return graph.compile(
