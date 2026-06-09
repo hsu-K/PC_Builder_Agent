@@ -17,6 +17,7 @@ const SUGGESTIONS = [
 ]
 
 export default function ChatPanel({ 
+  id,
   messages: initialMessages = [],
   preference = {},
   onBuildUpdate,
@@ -32,7 +33,7 @@ export default function ChatPanel({
   }, [messages, isLoading])
 
   const handleSend = (text) => {
-    sendMessage(text, onBuildUpdate, preference)
+    sendMessage(id, text, onBuildUpdate, preference)
   }
 
   const showSuggestions = messages.length === 0
@@ -90,7 +91,7 @@ export default function ChatPanel({
       </div>
 
       {/* Input */}
-      <ChatInput onSend={handleSend} disabled={isLoading} onSavePreference={onPreferenceUpdate} />
+      <ChatInput preference={preference} onSend={handleSend} disabled={isLoading} onSavePreference={onPreferenceUpdate} />
 
     </div>
   )

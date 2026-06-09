@@ -20,9 +20,11 @@ export function useChat(initialMessages = []) {
   let response = {}
 
   const sendMessage = async (
+    id,
     text,
     onBuildUpdate,
     preference = {},
+    pc_board_response=''
   ) => {
       const newMessages = [...messages, { role: 'user', content: text }]
       setMessages(newMessages)
@@ -30,9 +32,13 @@ export function useChat(initialMessages = []) {
       setIsLoading(true)
 
     try {
-      // TODO: 接API
       if(!useMock){
-        const body = { req: newMessages, preference }
+        const body = { 
+          id: id,
+          messages: newMessages,
+          preference: preference,
+          pc_board_response: pc_board_response?? ""
+        }
         const fetchResponse = await fetch('http://localhost:8000/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -74,7 +80,7 @@ export function useChat(initialMessages = []) {
       if (response.options !== undefined) updatePayload.options = response.options
       if (response.budget !== undefined) updatePayload.budget = response.budget
       if (response.suggestions !== undefined) updatePayload.suggestions = response.suggestions
-
+      if (response.pc_board_response !== undefined) updatePayload.pc_board_response = response.pc_board_response
       onBuildUpdate?.(updatePayload)
 
     } catch (e) {

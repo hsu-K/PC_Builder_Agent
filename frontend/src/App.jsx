@@ -38,6 +38,7 @@ function AppContent() {
 
       <ChatPanel
         key={activeChatId}
+        id={activeChatId}
         messages={activeChatMessages}
         preference={activeChatPreference}
         onBuildUpdate={updateChat}

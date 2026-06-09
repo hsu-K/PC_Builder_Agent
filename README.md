@@ -7,6 +7,10 @@
 cd test_server
 uvicorn server:app --reload --port 8000
 ```
+```
+cd backend
+uv run uvicorn server:app --reload --port 8000
+```
 
 #### UI建置(測試)
 ```

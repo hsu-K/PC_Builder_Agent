@@ -71,7 +71,7 @@ export function ActiveChatProvider({ children }) {
   )
 
   const addNewBuild = useCallback(() => {
-    const newId = Date.now()
+    const newId = crypto.randomUUID()
     const newChat = {
       ...DEFAULT_CHAT,
       id: newId,

@@ -52,9 +52,9 @@ const DEFAULT_FORM = {
   extra: '',
 }
 
-export default function TemplatePanel({ onSelect, onSavePreference }) {
+export default function TemplatePanel({ preference, onSelect, onSavePreference }) {
   const [tab, setTab] = useState('custom')   // 'custom' | 'preset'
-  const [form, setForm] = useState(DEFAULT_FORM)
+  const [form, setForm] = useState({ ...DEFAULT_FORM, ...preference })
 
   const toggleBrand = (brand) => {
     setForm(prev => ({
