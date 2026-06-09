@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from pc_builder_agent.graph import build_graph
 from pc_builder_agent.nodes import pc_board_scraper_node
 from pc_builder_agent.memory import PROFILE_STORE, _profile_namespace, PROFILE_KEY
+from .config import DEFAULT_LLM_PROVIDER, DEFAULT_MODEL_NAME_MAPPING, DEFAULT_MODEL_NAME
 
 
 def load_preferences() -> dict[str, str]:
@@ -106,7 +107,7 @@ def prepare_session_state(
 
 def run_chat(
     session_id: str = "default",
-    model_name: str | None = None,
+    model_name: str = DEFAULT_MODEL_NAME,
     debug: bool = False,
 ) -> None:
     """
@@ -142,6 +143,7 @@ def run_chat(
     print("PC Builder Agent - 聊天模式")
     print("=" * 60)
     print(f"Session ID: {session_id}")
+    print(f"使用模型:  {model_name}")
     # print(f"已載入 {len(state.get('pc_board_results', []))} 篇 PC_Board 文章供參考")
     print("\n說明:")
     print("  • 輸入你的 PC 組裝需求")

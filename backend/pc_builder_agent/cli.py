@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     
     支援的引數：
     - --session-id: 用於保持同一個會話的記憶和偏好 ID
-    - --model: 指定 OpenAI 模型 (預設從 OPENAI_MODEL 環境變數讀取)
+    - --model: 指定使用的模型名稱 (OpenAI 用 OPENAI_MODEL，Gemini 用 GEMINI_MODEL)
     
     返回：
         argparse.Namespace: 包含解析後的所有引數
@@ -52,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
-        help="使用的 OpenAI 模型名稱 (預設: gpt-4.1-mini)",
+        default=os.getenv("OPENAI_MODEL") or os.getenv("GEMINI_MODEL") or "gpt-4.1-mini",
+        help="使用的模型名稱 (OpenAI: OPENAI_MODEL / Gemini: GEMINI_MODEL)",
     )
     parser.add_argument(
         "--debug",

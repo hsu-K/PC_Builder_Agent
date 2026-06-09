@@ -4,20 +4,32 @@
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from typing import Any
 
 from pc_builder_agent.tools import TOOL_LOOKUP, PROFILE_TOOLS
 
+MAX_LOOP_LIMIT = 3
 
 def _model_name(model_name: str | None = None) -> str:
     """取得要使用的 OpenAI 模型名稱"""
     return model_name or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
 
-def build_model(model_name: str | None = None) -> ChatOpenAI:
-    """建構 ChatOpenAI 模型實例，temperature=0.2 確保回應相對確定"""
-    return ChatOpenAI(model=_model_name(model_name), temperature=0.2)
+def build_model(model_name: str | None = None, temperature=0.2) -> ChatOpenAI | ChatGoogleGenerativeAI:
+    """依 model_name 建構 ChatOpenAI 或 ChatGoogleGenerativeAI 模型實例，temperature=0.2 確保回應相對確定"""
+    model_name = _model_name(model_name)
+    if model_name.startswith("gpt"):
+        return ChatOpenAI(model=model_name, temperature=temperature)
+    elif model_name.startswith("gemini"):
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            temperature=temperature,
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    else:
+        raise ValueError(f"Unknown model: '{model_name}'")
 
 
 def message_text(message: BaseMessage) -> str:
@@ -113,7 +125,9 @@ def run_agent_turn(
     ]
 
     # 工具呼叫迴圈
-    while True:
+    max_loop = MAX_LOOP_LIMIT
+    while max_loop:
+        max_loop -= 1
         ai_message = model.invoke(conversation)
 
         if debug:
