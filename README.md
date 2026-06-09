@@ -4,10 +4,6 @@
 
 #### 開啟 server(測試)
 ```
-cd test_server
-uvicorn server:app --reload --port 8000
-```
-```
 cd backend
 uv run uvicorn server:app --reload --port 8000
 ```
@@ -23,3 +19,5 @@ npm install
 npm run dev
 ```
 進入建置的本地UI網站: `http://localhost:5173/`
+
+小提示: 網頁按 'F12` 可以看 console 來 debug

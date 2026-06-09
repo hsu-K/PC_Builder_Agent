@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from Message import Message, convert_messages
 
 from agent import PC_Builder_Agent
+from config import DEFAULT_MODEL_NAME
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -12,7 +13,7 @@ load_dotenv()
 @lru_cache(maxsize=1)
 def get_agent() -> PC_Builder_Agent:  # 拼錯：PCBuilder_Agent -> PC_Builder_Agent
     return PC_Builder_Agent(
-        model_name=None,
+        model_name=DEFAULT_MODEL_NAME,
         debug=True
     )
 
@@ -34,16 +35,28 @@ class ChatMessage(BaseModel):
 
 @app.post("/chat")
 async def chat(chatMessage: ChatMessage):
-    print(f"Recieve:\n{chatMessage}")
+    print("Server Recieve:"+"-"*25)
+    print(f"id: {chatMessage.id}")
+    print(f"messages: {chatMessage.messages}")
+    print(f"preference: {chatMessage.preference}")
+    print(f"pc_board_response: {chatMessage.pc_board_response}")
+    print("-"*30)
+
+    response = {}
     try:
         agent = get_agent()
         messages = convert_messages(chatMessage.messages)
-        response = agent.generate(
+        message = agent.generate(
             id=chatMessage.id,
             messages=messages,
             preference={**chatMessage.preference, "pc_board_response": chatMessage.pc_board_response}
         )
         state = agent.get_state()
+        agent.update_state(state)
+        response = {
+            **state,
+            'message':message,
+        }
     except Exception as e:
         response = {"error": str(e)}  # e 要轉 str
         print(e)

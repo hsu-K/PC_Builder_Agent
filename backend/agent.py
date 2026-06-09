@@ -3,6 +3,7 @@ from pc_builder_agent.graph import build_graph
 #from pc_builder_agent.memory import save_user_preference
 from config import DEFAULT_MODEL_NAME
 from langchain_core.messages import BaseMessage
+import ast
 
 
 from dotenv import load_dotenv
@@ -37,7 +38,7 @@ class PC_Builder_Agent:
             "profile_id": id,
             "preferences": preference,
             "pc_board_response": self.state.get("pc_board_response", ""),
-            "request": messages[-1].get("content",''),
+            "request": messages[-1].content,
             "messages": messages,
         }
         result = self.graph.invoke(
@@ -45,7 +46,18 @@ class PC_Builder_Agent:
             config={"configurable": {"thread_id": id}},
         )
         print(result)
-        response = result.get("final_answer") or result.get("pc_board_response") or "ERROR"
+        final_answer = result.get("final_answer")
+
+        if isinstance(final_answer, str):
+            try:
+                final_answer = ast.literal_eval(final_answer)  # "{'type': 'text', 'text': '...'}" → dict
+            except (ValueError, SyntaxError):
+                pass
+
+        response = (
+            final_answer.get("text") if isinstance(final_answer, dict)
+            else final_answer
+        ) or result.get("pc_board_response") or "ERROR"
 
         self.state["pc_board_response"] += '\n' + result.get("pc_board_response", "")
 
