@@ -13,10 +13,74 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, message_to_dict, messages_from_dict
 from pc_builder_agent.graph import build_graph
 from pc_builder_agent.nodes import pc_board_scraper_node
 from pc_builder_agent.memory import PROFILE_STORE, _profile_namespace, PROFILE_KEY
+
+
+# ============================================================================
+# Session 持久化 - 將 state 存到 data/sessions/{session_id}.json
+# ============================================================================
+
+SESSION_DIR = Path(__file__).parent / "data" / "sessions"
+
+
+def _ensure_session_dir() -> None:
+    """確保 data/sessions/ 資料夾存在。"""
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _session_path(session_id: str) -> Path:
+    """回傳 session 檔案的完整路徑。"""
+    return SESSION_DIR / f"{session_id}.json"
+
+
+def save_session(session_id: str, state: dict, messages: list) -> None:
+    """將當前的 session state 持久化到 data/sessions/{session_id}.json。
+
+    包含偏好設定、文章結果、已選零件、訊息歷史等，讓下次同 session_id 啟動時能接續對話。
+    """
+    _ensure_session_dir()
+    data = {
+        "preferences": state.get("preferences", {}),
+        "pc_board_results": state.get("pc_board_results", []),
+        "pc_board_response": state.get("pc_board_response", ""),
+        "selected_components": state.get("selected_components"),
+        "selected_budget": state.get("selected_budget"),
+        "selected_use_case": state.get("selected_use_case"),
+        "current_target_category": state.get("current_target_category"),
+        "selection_flow_complete": state.get("selection_flow_complete"),
+        "last_component_options": state.get("last_component_options"),
+        "pending_reselect_category": state.get("pending_reselect_category"),
+        "messages": [message_to_dict(m) for m in messages],
+    }
+    # 移除 None 值讓 JSON 更乾淨
+    data = {k: v for k, v in data.items() if v is not None}
+    with open(_session_path(session_id), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_session(session_id: str) -> dict | None:
+    """從 data/sessions/{session_id}.json 載入先前儲存的 session state。
+
+    Returns:
+        dict | None: 包含 preferences / messages / pc_board_results 等欄位；
+                      若檔案不存在或格式錯誤則回傳 None。
+    """
+    path = _session_path(session_id)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 反序列化訊息歷史（dict → BaseMessage 物件）
+        if "messages" in data:
+            data["messages"] = messages_from_dict(data["messages"])
+        return data
+    except Exception as e:
+        print(f"\n⚠️  無法載入 session 檔案 ({e})，將重新開始新的對話")
+        return None
 
 
 def load_preferences() -> dict[str, str]:
@@ -127,22 +191,43 @@ def run_chat(
     print("=" * 60)
     print("PC Builder Agent - 初始化中...")
     print("=" * 60)
-    
-    # ===== 步驟 1：載入偏好設定與爬取文章 =====
-    state = prepare_session_state(session_id=session_id, model_name=model_name, debug=debug)
-    
+
+    # ===== 步驟 1：嘗試載入已儲存的 session =====
+    saved_session = load_session(session_id)
+    if saved_session is not None:
+        print(f"✓ 找到先前儲存的 session「{session_id}」，還原對話狀態")
+        state = {
+            "preferences": saved_session.get("preferences", {}),
+            "pc_board_results": saved_session.get("pc_board_results", []),
+            "pc_board_response": saved_session.get("pc_board_response", ""),
+            "selected_components": saved_session.get("selected_components"),
+            "selected_budget": saved_session.get("selected_budget"),
+            "selected_use_case": saved_session.get("selected_use_case"),
+            "current_target_category": saved_session.get("current_target_category"),
+            "selection_flow_complete": saved_session.get("selection_flow_complete"),
+            "last_component_options": saved_session.get("last_component_options"),
+            "pending_reselect_category": saved_session.get("pending_reselect_category"),
+        }
+        # 還原訊息歷史（已由 messages_from_dict 反序列化為 BaseMessage 物件）
+        messages_history = list(saved_session.get("messages", []))
+
+        if state.get("pc_board_results"):
+            print(f"✓ 載入 {len(state['pc_board_results'])} 篇先前取得的 PC_Board 文章")
+        if messages_history:
+            print(f"✓ 載入 {len(messages_history)} 筆對話歷史")
+    else:
+        # ===== 無已儲存 session：載入偏好設定與爬取文章 =====
+        state = prepare_session_state(session_id=session_id, model_name=model_name, debug=debug)
+        messages_history = []
+
     # ===== 步驟 2：建構 LangGraph 應用 =====
     app = build_graph(model_name=model_name, debug=debug)
-    
-    # 初始化訊息歷史
-    messages_history = []
     
     # ===== 步驟 3：進入聊天迴圈 =====
     print("\n" + "=" * 60)
     print("PC Builder Agent - 聊天模式")
     print("=" * 60)
     print(f"Session ID: {session_id}")
-    # print(f"已載入 {len(state.get('pc_board_results', []))} 篇 PC_Board 文章供參考")
     print("\n說明:")
     print("  • 輸入你的 PC 組裝需求")
     print("  • 可詢問關於已載入文章的內容（如：'告訴我文章中有哪些配置'）")
@@ -228,6 +313,9 @@ def run_chat(
             
             # 將 agent 的回應也加入訊息歷史
             messages_history.append(AIMessage(content=response))
+
+            # 將本次回合的 state 持久化，下次同 session_id 啟動時可接續對話
+            save_session(session_id, state, messages_history)
             
         except KeyboardInterrupt:
             # 允許使用者用 Ctrl+C 中斷

@@ -277,7 +277,7 @@ def _keyword_fallback_route_targets(state: dict) -> tuple[list[str], str]:
     #     or bool(_BRAND_INTENT_RE.search(combined_text))
     # )
 
-    ecommerce_match = _contains_keyword(combined_text, ECOMMERCE_KEYWORDS) or interactive_match
+    ecommerce_match = _contains_keyword(combined_text, ECOMMERCE_KEYWORDS)
 
     component_targets: list[str] = []
     if memory_match:
