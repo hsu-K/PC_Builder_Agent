@@ -18,6 +18,7 @@ npm install
 # 跑本地UI
 npm run dev
 ```
-進入建置的本地UI網站: `http://localhost:5173/`
-
-小提示: 網頁按 'F12` 可以看 console 來 debug
+* 進入建置的本地UI網站: `http://localhost:5173/`
+  > 小提示: 網頁按 'F12` 可以看 console 來 debug
+* `frontend/src/hooks/useChat.js` 為前端對街後端的地方
+* 前端接收格式可參考`test_server/mock_data.json`
