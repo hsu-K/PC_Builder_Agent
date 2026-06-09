@@ -330,6 +330,10 @@ def _render_ecommerce_final_answer(request: str | None, ecommerce_options: dict[
             detail_bits.append(f"晶片組 {item.get('chipset')}")
         if item.get("capacity") and item.get("category") != "gpu":
             detail_bits.append(f"容量 {item.get('capacity')}")
+        if item.get("cooler_type") and item.get("cooler_type") != "Unknown":
+            detail_bits.append(str(item.get("cooler_type")))
+        if item.get("radiator_size"):
+            detail_bits.append(f"{item.get('radiator_size')}mm")
         if item.get("interface"):
             detail_bits.append(str(item.get("interface")))
         if item.get("source"):
@@ -425,9 +429,23 @@ def ecommerce_node(
     """
 
     ecommerce_options = _build_structured_options_for_request(state.get("request"), db_path)
+    final_answer = _render_ecommerce_final_answer(state.get("request"), ecommerce_options)
+
+    if final_answer and ecommerce_options:
+        if debug:
+            print("Ecommerce Node DB Path:", db_path)
+            print("Ecommerce Node Advice:", final_answer)
+            print("Ecommerce Node Final:", final_answer)
+            print("===============================================================")
+        return {
+            "messages": [AIMessage(content=final_answer)],
+            "ecommerce_advice": final_answer,
+            "final_answer": final_answer,
+            "ecommerce_options": ecommerce_options,
+        }
 
     # ---- 其餘(完整菜單 / 價格 / 優惠 / 搭板 / 散熱器查詢…)維持 LLM tool-calling 路徑 ----
-    ai_message, text = run_agent_turn(
+    _ai_message, text = run_agent_turn(
         state=state,
         role_name="Ecommerce Recommendation Specialist",
         system_prompt=_build_ecommerce_system_prompt(db_path),
@@ -440,7 +458,7 @@ def ecommerce_node(
         debug=debug,
     )
 
-    final_answer = _render_ecommerce_final_answer(state.get("request"), ecommerce_options) or text
+    final_answer = final_answer or text
 
     if debug:
         print("Ecommerce Node DB Path:", db_path)

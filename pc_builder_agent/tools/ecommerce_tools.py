@@ -130,6 +130,92 @@ def _gpu_vram_from_product(product: dict[str, Any], specs: dict[str, Any]) -> st
     return None
 
 
+def _normalize_cooler_type(value: Any) -> str | None:
+    if not value:
+        return None
+    text = str(value).strip().upper()
+    if any(tok in text for tok in ("AIO", "LIQUID", "水冷", "水冷排", "一體式")):
+        return "AIO"
+    if any(tok in text for tok in ("AIR", "TOWER", "TOPDOWN", "空冷", "塔扇", "塔散", "雙塔", "下吹")):
+        return "Air"
+    return None
+
+
+def _parse_cooler_radiator_size(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value if value in {120, 140, 240, 280, 360, 420} else None
+    text = str(value).strip().upper()
+    import re
+    match = re.search(r"\b(120|140|240|280|360|420)\b", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _cooler_specs_from_product(product: dict[str, Any], specs: dict[str, Any]) -> dict[str, Any]:
+    text = " ".join(
+        str(part)
+        for part in (
+            product.get("product_name") or "",
+            product.get("model") or "",
+            specs.get("cooler_type") or "",
+            specs.get("radiator_size") or "",
+            specs.get("size") or "",
+        )
+        if part
+    )
+    cooler_type = _normalize_cooler_type(specs.get("cooler_type")) or _normalize_cooler_type(text) or "Unknown"
+    radiator_size = _parse_cooler_radiator_size(specs.get("radiator_size"))
+    if radiator_size is None and cooler_type == "AIO":
+        radiator_size = _parse_cooler_radiator_size(text)
+    if cooler_type != "AIO":
+        radiator_size = None
+    return {
+        "cooler_type": cooler_type,
+        "radiator_size": radiator_size,
+    }
+
+
+def _cooler_style_from_value(value: Any) -> str | None:
+    if not value:
+        return None
+    text = str(value).strip().upper()
+    if any(tok in text for tok in ("TOPDOWN", "下吹")):
+        return "TopDown"
+    if any(tok in text for tok in ("TOWER", "塔扇", "塔散", "雙塔", "單塔")):
+        return "Tower"
+    return None
+
+
+def _normalize_query_specs(raw_category: str | None, query_specs: dict[str, Any] | None) -> dict[str, Any]:
+    specs = dict(query_specs or {})
+    if raw_category != "Cooler":
+        return specs
+    raw_types = specs.get("cooler_type")
+    if raw_types is None:
+        return specs
+    if not isinstance(raw_types, list):
+        raw_types = [raw_types]
+    types: list[str] = []
+    styles: list[str] = []
+    for value in raw_types:
+        norm = _normalize_cooler_type(value)
+        if norm and norm not in types:
+            types.append(norm)
+        style = _cooler_style_from_value(value)
+        if style and style not in styles:
+            styles.append(style)
+    if types:
+        specs["cooler_type"] = types
+    else:
+        specs.pop("cooler_type", None)
+    if styles:
+        specs["cooler_style"] = styles
+    return specs
+
+
 def _compatibility_notes_from_product(product: dict[str, Any]) -> str | None:
     specs = _specs_dict(product.get("specs"))
     notes: list[str] = []
@@ -190,8 +276,11 @@ def _structured_item_from_product(
     specs = _specs_dict(item.get("specs"))
     raw_category = category or item.get("category")
     gpu_vram = None
+    cooler_specs = {"cooler_type": None, "radiator_size": None}
     if raw_category == "GPU":
         gpu_vram = _gpu_vram_from_product(item, specs)
+    elif raw_category == "Cooler":
+        cooler_specs = _cooler_specs_from_product(item, specs)
     model_value = item.get("model")
     model_key = item.get("model_key") or _normalize_model_key(model_value or item.get("product_name") or item.get("name") or "")
     out = {
@@ -217,6 +306,8 @@ def _structured_item_from_product(
         "efficiency": specs.get("certification"),
         "interface": specs.get("interface"),
         "vram": gpu_vram,
+        "cooler_type": cooler_specs.get("cooler_type"),
+        "radiator_size": cooler_specs.get("radiator_size"),
         "stock_status": item.get("stock_status"),
     }
     return out
@@ -283,7 +374,7 @@ def build_ecommerce_options_from_search_result(
         "fallback_level": payload.get("fallback_level") or ("exact" if exact_match else ("spec" if spec_match else "similar")),
         "fallback_used": bool(fallback_used),
         "matched_strategy": payload.get("matched_strategy"),
-        "query_specs": payload.get("query_specs") or ({"category": raw_category} if raw_category else {}),
+        "query_specs": _normalize_query_specs(raw_category, payload.get("query_specs") or ({"category": raw_category} if raw_category else {})),
         "items": items,
         "summary": summary,
         "warnings": warnings,
