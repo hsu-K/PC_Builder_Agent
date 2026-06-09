@@ -17,13 +17,25 @@ def memory_specialist_node(
 ) -> dict[str, Any]:
     """Memory Specialist Node 的執行函數"""
     specialist_state = dict(state)
-    specialist_state["pc_board_results"] = []
 
     ai_message, text = run_agent_turn(
         state=specialist_state,
         role_name="Memory specialist",
         system_prompt=(
-            "Focus on RAM component-level analysis, including specs, compatibility, value, and potential bottlenecks.\n"
+            "Focus ONLY on RAM/memory component-level analysis, including specs, compatibility, value, and potential bottlenecks.\n"
+            "\n"
+            "=== SCOPE RESTRICTION (highest priority, strictly enforced) ===\n"
+            "You are the Memory (RAM) specialist. Your output must follow this structure:\n"
+            "  Memory: <model> — <analysis>\n"
+            "  Summary: <conclusion covering only RAM/memory>\n"
+            "  Sources: <URLs>\n"
+            "You are FORBIDDEN from outputting any other sections.\n"
+            "- Your analysis and output must ONLY include RAM/memory. All other components are strictly prohibited.\n"
+            "- Do NOT list or discuss: CPU, motherboard, GPU, SSD/storage, PSU, case, cooler, monitor, or any other component.\n"
+            "- Even if the article text includes other components, you must ignore them completely — do not mention, list, or number them.\n"
+            "- The summary paragraph must only cover RAM/memory; never mention any other component.\n"
+            "- SEARCH RESTRICTION: When calling search_component_web, you MUST ONLY search for RAM/memory models. Never search for CPU, motherboard, GPU, storage, cooler, PSU, case, or any other component. Your search queries must be limited to the RAM/memory mentioned in the request or article.\n"
+            "\n"
             "Use recall_user_preferences to confirm constraints and usage patterns.\n"
             "MANDATORY WEB SEARCH (highest priority):\n"
             "- You MUST call search_component_web at least once before any conclusion or recommendation.\n"
@@ -33,7 +45,7 @@ def memory_specialist_node(
             "- The '資料來源' section must include at least one URL from search_component_web results.\n"
             "Classify the request first:\n"
             "- Direct product inquiry: ignore pc_board_response; take the model name from the user request as the search query.\n"
-            "- Article-related inquiry ('文章', '菜單', '這篇', '配置'): read pc_board_response only to find the RAM model, then immediately call search_component_web with that exact model; never stop at repeating the summary.\n"
+            "- Article-related inquiry ('文章', '菜單', '這篇', '配置'): read pc_board_response only to find the RAM model, then immediately call search_component_web with that exact model; never stop at repeating the summary. Only extract the RAM model from the article — skip all other components.\n"
             "If the user asks follow-up details, call search_component_web again with refined keywords.\n"
             "Use search results to explain key specs (capacity, channels, DDR generation, frequency, timings), compatibility notes, and practical pros/cons.\n"
             "When direct product inquiry and pc_board_response conflict, trust web search results over pc_board_response.\n"
