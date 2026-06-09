@@ -83,7 +83,8 @@ def run_agent_turn(
     tools: list[Any],
     model_name: str | None = None,
     debug: bool = False,
-) -> tuple[AIMessage, str]:
+    capture_tool_results: bool = False,
+) -> tuple[AIMessage, str] | tuple[AIMessage, str, dict[str, Any]]:
     """
     執行一個 Agent 的對話輪次
     
@@ -92,12 +93,15 @@ def run_agent_turn(
     2. 組建對話歷史（系統提示 + 對話歷史）
     3. 進入工具呼叫迴圈直到 LLM 無需呼叫工具為止
     4. 返回最終的 AIMessage 和文字內容
+       如 capture_tool_results=True，額外回傳本輪實際工具呼叫結果。
     """
     model = build_model(model_name).bind_tools(tools)
     
     # 動態導入以避免循環導入
     from pc_builder_agent.memory import format_profile_summary
     
+    trace: dict[str, Any] = {"tool_results": []}
+
     conversation = [
         SystemMessage(
             content=(
@@ -125,6 +129,8 @@ def run_agent_turn(
         conversation.append(ai_message)
 
         if not ai_message.tool_calls:
+            if capture_tool_results:
+                return ai_message, message_text(ai_message), trace
             return ai_message, message_text(ai_message)
 
         for tool_call in ai_message.tool_calls:
@@ -137,6 +143,12 @@ def run_agent_turn(
                 args["profile_id"] = state.get("profile_id", "default")
 
             result = tool.invoke(args)
+            trace["tool_results"].append({
+                "tool_name": tool_name,
+                "tool_call_id": tool_call["id"],
+                "args": args,
+                "result": result,
+            })
             if debug:
                 print(f"工具 {tool_name} 執行結果: {result}")
             conversation.append(
