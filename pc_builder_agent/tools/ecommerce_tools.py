@@ -20,6 +20,7 @@ from langchain_core.tools import tool
 
 from pc_builder_agent.tools.ecommerce_db import (
     DEFAULT_DB_PATH,
+    _normalize_model_key,
     query_products,
     search_products_with_fallback,
     find_deals,
@@ -123,7 +124,7 @@ def _gpu_vram_from_product(product: dict[str, Any], specs: dict[str, Any]) -> st
         return capacity.strip()
     text = f"{product.get('product_name') or ''} {product.get('model') or ''}"
     import re
-    m = re.search(r"\b(8|10|12|16|20|24)\s*G(?:B)?\b", text.upper())
+    m = re.search(r"(?:^|[^0-9])(8|10|12|16|20|24)\s*G(?:B)?\b", text.upper())
     if m:
         return f"{m.group(1)}GB"
     return None
@@ -191,6 +192,8 @@ def _structured_item_from_product(
     gpu_vram = None
     if raw_category == "GPU":
         gpu_vram = _gpu_vram_from_product(item, specs)
+    model_value = item.get("model")
+    model_key = item.get("model_key") or _normalize_model_key(model_value or item.get("product_name") or item.get("name") or "")
     out = {
         "name": item.get("product_name") or item.get("name"),
         "price": item.get("price"),
@@ -202,12 +205,16 @@ def _structured_item_from_product(
         "source_url": item.get("url") or item.get("source_url") or "",
         "reason": reason or item.get("reason") or _reason_from_product(item, exact_match=exact_match, fallback_used=fallback_used),
         "compatibility_notes": compatibility_notes or item.get("compatibility_notes") or _compatibility_notes_from_product(item),
-        "model": item.get("model"),
+        "model": model_value,
+        "model_key": model_key,
         "platform": specs.get("platform") or item.get("platform"),
         "socket": specs.get("socket") or item.get("socket"),
         "memory_generation": specs.get("memory_generation") or item.get("memory_generation"),
         "chipset": specs.get("chipset"),
         "capacity": specs.get("capacity"),
+        "speed": specs.get("speed"),
+        "wattage": specs.get("wattage"),
+        "efficiency": specs.get("certification"),
         "interface": specs.get("interface"),
         "vram": gpu_vram,
         "stock_status": item.get("stock_status"),
@@ -242,6 +249,7 @@ def build_ecommerce_options_from_search_result(
     products = payload.get("products") or []
     exact_match = payload.get("exact_match")
     spec_match = payload.get("spec_match")
+    model_match = payload.get("model_match")
     fallback_used = payload.get("fallback_used")
     warning = payload.get("warning")
     warnings = [warning] if warning else []
@@ -271,6 +279,8 @@ def build_ecommerce_options_from_search_result(
         "exact_match": bool(exact_match),
         "high_confidence_match": bool(payload.get("high_confidence_match")),
         "spec_match": bool(spec_match) if spec_match is not None else bool(exact_match),
+        "model_match": bool(model_match) if model_match is not None else bool(exact_match),
+        "fallback_level": payload.get("fallback_level") or ("exact" if exact_match else ("spec" if spec_match else "similar")),
         "fallback_used": bool(fallback_used),
         "matched_strategy": payload.get("matched_strategy"),
         "query_specs": payload.get("query_specs") or ({"category": raw_category} if raw_category else {}),
@@ -517,6 +527,8 @@ def search_ecommerce_products(
             "exact_match": bool(result.get("exact_match")),
             "high_confidence_match": bool(result.get("high_confidence_match")),
             "spec_match": bool(result.get("spec_match")) if result.get("spec_match") is not None else bool(result.get("exact_match")),
+            "model_match": bool(result.get("model_match")) if result.get("model_match") is not None else bool(result.get("exact_match")),
+            "fallback_level": result.get("fallback_level") or ("exact" if result.get("exact_match") else ("spec" if result.get("spec_match") else "similar")),
             "fallback_used": bool(result.get("fallback_used")),
             "warning": result.get("warning"),
             "matched_strategy": result.get("matched_strategy"),

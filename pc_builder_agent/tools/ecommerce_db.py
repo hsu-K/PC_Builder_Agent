@@ -594,11 +594,11 @@ def _extract_capacity_tokens(text: str | None) -> list[str]:
         token = f"{int(tb)}TB"
         if token not in tokens:
             tokens.append(token)
-    for gb in re.findall(r"(\d{2,4})\s*GB", up):
+    for gb in re.findall(r"(\d{1,4})\s*GB", up):
         token = f"{int(gb)}GB"
         if token not in tokens:
             tokens.append(token)
-    for g in re.findall(r"(\d{2,4})\s*G\b", up):
+    for g in re.findall(r"(\d{1,4})\s*G\b", up):
         token = f"{int(g)}GB"
         if token not in tokens:
             tokens.append(token)
@@ -694,13 +694,14 @@ def _extract_cooler_kinds(text: str | None) -> list[str]:
     if not text:
         return kinds
     up = unicodedata.normalize("NFKC", str(text)).upper()
-    if any(tok in up for tok in ("水冷", "AIO")):
+    has_aio = any(tok in up for tok in ("水冷", "AIO"))
+    if has_aio:
         kinds.append("AIO")
     if any(tok in up for tok in ("塔散", "雙塔", "單塔")):
         kinds.extend(["AIR", "TOWER"])
     elif "下吹" in up:
         kinds.extend(["AIR", "TOPDOWN"])
-    elif "空冷" in up or "散熱器" in up:
+    elif "空冷" in up or ("散熱器" in up and not has_aio):
         kinds.append("AIR")
     dedup: list[str] = []
     for k in kinds:
@@ -1191,6 +1192,89 @@ def _product_search_tokens(product: dict, category: str | None) -> set[str]:
     return tokens
 
 
+def _product_search_text(product: dict) -> str:
+    sp = _specs_of(product)
+    parts = [
+        product.get("product_name") or "",
+        product.get("brand") or "",
+        product.get("model") or "",
+        sp.get("capacity") or "",
+        sp.get("interface") or "",
+        sp.get("chipset") or "",
+        sp.get("memory_generation") or "",
+        sp.get("socket") or "",
+    ]
+    return unicodedata.normalize("NFKC", " ".join(str(p) for p in parts if p)).upper()
+
+
+def _context_model_label(context: dict[str, Any], category: str | None) -> str | None:
+    if category == "GPU":
+        if context.get("gpu_families") or context.get("gpu_numbers") or context.get("gpu_suffixes"):
+            fam = _first_or_none(context.get("gpu_families") or [])
+            num = _first_or_none(context.get("gpu_numbers") or [])
+            suffix = _first_or_none(context.get("gpu_suffixes") or [])
+            label = (f"{fam} {num}" if fam else str(num or "")).strip()
+            if suffix:
+                label = f"{label} {suffix}".strip()
+            return label or None
+        unknown = context.get("unknown_model_tokens") or []
+        return _first_or_none(unknown)
+    unknown = context.get("unknown_model_tokens") or []
+    return _first_or_none(unknown)
+
+
+def _product_matches_query_model(product: dict, context: dict[str, Any], category: str | None) -> bool:
+    ptokens = _product_search_tokens(product, category)
+    text = _product_search_text(product)
+    if category == "GPU" and (context.get("gpu_families") or context.get("gpu_numbers") or context.get("gpu_suffixes")):
+        fams = {f"GPUFAM:{fam}" for fam in context.get("gpu_families") or []}
+        nums = {f"GPUNUM:{n}" for n in context.get("gpu_numbers") or []}
+        suffixes = {f"GPUSFX:{s}" for s in context.get("gpu_suffixes") or []}
+        checks = [
+            not fams or bool(ptokens & fams),
+            not nums or bool(ptokens & nums),
+            not suffixes or bool(ptokens & suffixes),
+        ]
+        if all(checks):
+            return True
+    excluded_tokens = set(context.get("gpu_vram_capacities") or []) | set(context.get("ram_capacities") or []) | set(context.get("storage_capacities") or [])
+    model_tokens = []
+    for tok in context.get("unknown_model_tokens") or []:
+        if not tok or tok in _WEAK_TOKEN_WORDS:
+            continue
+        norm_tok = unicodedata.normalize("NFKC", str(tok)).upper()
+        if norm_tok in excluded_tokens:
+            continue
+        if re.fullmatch(r"\d+(?:GB|TB|G|W)", norm_tok):
+            continue
+        model_tokens.append(norm_tok)
+    if not model_tokens:
+        return True
+    compact = re.sub(r"[^A-Z0-9]", "", text)
+    for token in model_tokens:
+        norm = unicodedata.normalize("NFKC", str(token)).upper()
+        if norm in text or re.sub(r"[^A-Z0-9]", "", norm) in compact:
+            return True
+    return False
+
+
+def _context_requires_model_match(context: dict[str, Any], category: str | None) -> bool:
+    if category == "GPU":
+        return bool(context.get("gpu_families") or context.get("gpu_numbers") or context.get("gpu_suffixes") or context.get("unknown_model_tokens"))
+    return bool(context.get("unknown_model_tokens"))
+
+
+def _select_products_by_model_match(products: list[dict], context: dict[str, Any], category: str | None) -> tuple[list[dict], bool]:
+    if not products:
+        return [], False
+    if not _context_requires_model_match(context, category):
+        return products, True
+    matched = [item for item in products if _product_matches_query_model(item, context, category)]
+    if matched:
+        return matched, True
+    return products, False
+
+
 def _product_matches_required_specs(product: dict, context: dict[str, Any], category: str | None) -> bool:
     ptokens = _product_search_tokens(product, category)
     if category == "GPU":
@@ -1627,26 +1711,39 @@ def _finalize_search_result(
     else:
         selected, spec_match = _select_products_by_required_specs(products, context, category)
         selected = _dedupe_products_by_identity(selected)[: int(limit)]
+    selected, model_match = _select_products_by_model_match(selected, context, category)
+    selected = _dedupe_products_by_identity(selected)[: int(limit)]
     query_specs = context.get("query_specs") or _query_specs_from_context(context)
+    fallback_level = "exact" if exact_match else ("spec" if spec_match and model_match else "similar")
+    if selected and _context_requires_model_match(context, category) and not model_match:
+        spec_match = False
     if not spec_match and selected:
         exact_match = False
         high_confidence_match = False
         fallback_used = True
+        fallback_level = "similar"
+    model_label = _context_model_label(context, category)
     if selected:
-        if exact_match and spec_match:
+        if exact_match and spec_match and model_match:
             warning = None
+            fallback_level = "exact"
+        elif not model_match and model_label:
+            warning = f"沒有找到「{model_label}」這個型號，以下僅列出相近商品。"
         elif spec_match:
             warning = f"沒有找到完全相同型號「{query}」的價格資料，以下是相近商品。"
         else:
             warning = f"沒有找到完全符合「{query}」規格條件的商品，以下是相近商品。"
     else:
         warning = f"沒有找到完全相同型號「{query}」的價格資料，且目前資料庫沒有足夠相近商品可供參考。"
+        fallback_level = "none"
     return {
         "query": query,
         "category": category,
         "exact_match": bool(exact_match),
         "high_confidence_match": bool(high_confidence_match),
         "spec_match": bool(spec_match) if selected else False,
+        "model_match": bool(model_match) if selected else False,
+        "fallback_level": fallback_level,
         "fallback_used": bool(fallback_used),
         "warning": warning,
         "matched_strategy": matched_strategy,
