@@ -13,11 +13,12 @@ Ecommerce Recommendation Node - 專注於電子商城商品查詢與優惠推薦
 """
 
 from datetime import datetime
+import json
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from pc_builder_agent.nodes.base import run_agent_turn
+from pc_builder_agent.nodes.base import build_model, run_agent_turn
 from pc_builder_agent.tools import (
     search_ecommerce_products,
     find_ecommerce_deals_tool,
@@ -346,6 +347,88 @@ def _render_ecommerce_final_answer(request: str | None, ecommerce_options: dict[
     return "\n".join(lines)
 
 
+def _grounded_items_payload(items: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for item in items[:limit]:
+        payload.append({
+            "name": item.get("name"),
+            "price": item.get("price"),
+            "price_text": item.get("price_text"),
+            "category": item.get("category"),
+            "brand": item.get("brand"),
+            "reason": item.get("reason"),
+            "compatibility_notes": item.get("compatibility_notes"),
+            "vram": item.get("vram"),
+            "memory_generation": item.get("memory_generation"),
+            "chipset": item.get("chipset"),
+            "capacity": item.get("capacity"),
+            "interface": item.get("interface"),
+            "wattage": item.get("wattage"),
+            "efficiency": item.get("efficiency"),
+            "cooler_type": item.get("cooler_type"),
+            "radiator_size": item.get("radiator_size"),
+            "source": item.get("source"),
+        })
+    return payload
+
+
+def _render_ecommerce_final_answer_with_llm(
+    request: str | None,
+    ecommerce_options: dict[str, Any] | None,
+    *,
+    model_name: str | None = None,
+) -> str | None:
+    if not ecommerce_options:
+        return None
+    items = list(ecommerce_options.get("items") or [])
+    if not items:
+        return None
+
+    grounded_payload = {
+        "query": ecommerce_options.get("query") or request,
+        "category": ecommerce_options.get("category"),
+        "exact_match": ecommerce_options.get("exact_match"),
+        "spec_match": ecommerce_options.get("spec_match"),
+        "model_match": ecommerce_options.get("model_match"),
+        "fallback_level": ecommerce_options.get("fallback_level"),
+        "summary": ecommerce_options.get("summary"),
+        "warnings": ecommerce_options.get("warnings") or [],
+        "query_specs": ecommerce_options.get("query_specs") or {},
+        "items": _grounded_items_payload(items),
+    }
+
+    system_prompt = (
+        "你是 PC 零組件電商查詢助手。"
+        "你只能根據提供的 ecommerce_options 撰寫 Traditional Chinese 回覆。"
+        "禁止新增、猜測、改寫任何不在 items 裡的商品、價格、規格、品牌或商城。"
+        "若 exact_match=false 或 spec_match=false 或 model_match=false，"
+        "必須清楚說明沒有找到完全相同型號或完整符合規格的商品，以下僅為相近候選。"
+        "若 warnings 有內容，必須忠實反映 warning 的意思。"
+        "商品清單只可引用 items 中出現的商品，順序也要跟 items 一致。"
+        "你列出的每一筆商品名稱必須逐字照抄 items.name，不能縮寫、不能省略括號、不能改寫。"
+        "你列出的每一筆價格必須逐字照抄 items.price_text。"
+        "商品清單請使用『1. 商品完整名稱 — 完整價格』格式，再補一小句說明。"
+        "用精簡、自然、可讀的繁體中文回答。"
+    )
+    human_prompt = (
+        f"原始使用者查詢：{request or ecommerce_options.get('query') or ''}\n\n"
+        "請只根據以下結構化資料回答，不可使用其他知識：\n"
+        f"{json.dumps(grounded_payload, ensure_ascii=False, indent=2)}"
+    )
+
+    try:
+        message = build_model(model_name).invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt),
+        ])
+    except Exception:
+        return None
+
+    content = message.content if isinstance(message.content, str) else "\n".join(str(part) for part in message.content)
+    text = str(content).strip()
+    return text or None
+
+
 def _build_structured_options_for_request(request: str | None, db_path: str) -> dict[str, Any] | None:
     text = str(request or "").strip()
     if not text:
@@ -384,6 +467,60 @@ def _build_structured_options_for_request(request: str | None, db_path: str) -> 
         )
 
     return None
+
+
+def _structured_options_from_tool_trace(tool_trace: list[dict[str, Any]] | None, request: str | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not tool_trace:
+        return None, None
+    for entry in reversed(tool_trace):
+        tool_name = entry.get("tool_name")
+        result = entry.get("result")
+        args = entry.get("args") or {}
+        mode = None
+        category = args.get("category")
+        if tool_name == "recommend_pc_build_tool":
+            mode = "build_plan"
+        elif tool_name == "recommend_component_options_tool":
+            mode = "component_options"
+            category = result.get("category") if isinstance(result, dict) else category
+        elif tool_name == "search_ecommerce_products":
+            mode = "product_search"
+            if isinstance(result, dict):
+                category = result.get("category") or category
+        else:
+            continue
+        options = extract_structured_ecommerce_options(result, query=request, category=category, mode=mode)
+        if options:
+            return options, {"tool_name": tool_name, "mode": mode, "category": category}
+    return None, None
+
+
+def _query_spec_signal_count(ecommerce_options: dict[str, Any] | None) -> int:
+    if not ecommerce_options:
+        return -1
+    query_specs = dict(ecommerce_options.get("query_specs") or {})
+    query_specs.pop("category", None)
+    score = 0
+    for value in query_specs.values():
+        if isinstance(value, list):
+            score += len([v for v in value if v not in (None, "")])
+        elif value not in (None, ""):
+            score += 1
+    return score
+
+
+def _choose_preferred_ecommerce_options(request: str | None, trace_options: dict[str, Any] | None, trace_source: dict[str, Any] | None, fallback_options: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if trace_options and fallback_options:
+        trace_score = _query_spec_signal_count(trace_options)
+        fallback_score = _query_spec_signal_count(fallback_options)
+        if fallback_score > trace_score:
+            return fallback_options, {"tool_name": "_build_structured_options_for_request", "mode": "fallback_preferred", "category": fallback_options.get("category_key")}
+        return trace_options, trace_source
+    if trace_options:
+        return trace_options, trace_source
+    if fallback_options:
+        return fallback_options, {"tool_name": "_build_structured_options_for_request", "mode": "fallback", "category": fallback_options.get("category_key")}
+    return None, None
 
 
 def ecommerce_node(
@@ -428,24 +565,10 @@ def ecommerce_node(
         return updates
     """
 
-    ecommerce_options = _build_structured_options_for_request(state.get("request"), db_path)
-    final_answer = _render_ecommerce_final_answer(state.get("request"), ecommerce_options)
+    fallback_options = _build_structured_options_for_request(state.get("request"), db_path)
 
-    if final_answer and ecommerce_options:
-        if debug:
-            print("Ecommerce Node DB Path:", db_path)
-            print("Ecommerce Node Advice:", final_answer)
-            print("Ecommerce Node Final:", final_answer)
-            print("===============================================================")
-        return {
-            "messages": [AIMessage(content=final_answer)],
-            "ecommerce_advice": final_answer,
-            "final_answer": final_answer,
-            "ecommerce_options": ecommerce_options,
-        }
-
-    # ---- 其餘(完整菜單 / 價格 / 優惠 / 搭板 / 散熱器查詢…)維持 LLM tool-calling 路徑 ----
-    _ai_message, text = run_agent_turn(
+    # ---- 原本的 LLM tool-calling 路徑保留，並取出實際被使用的 tool result ----
+    _ai_message, text, trace = run_agent_turn(
         state=state,
         role_name="Ecommerce Recommendation Specialist",
         system_prompt=_build_ecommerce_system_prompt(db_path),
@@ -456,19 +579,45 @@ def ecommerce_node(
                save_selected_build_tool],
         model_name=model_name,
         debug=debug,
+        capture_tool_results=True,
     )
 
-    final_answer = final_answer or text
+    trace_options, trace_source = _structured_options_from_tool_trace(
+        trace.get("tool_results") if isinstance(trace, dict) else None,
+        state.get("request"),
+    )
+    ecommerce_options, options_source = _choose_preferred_ecommerce_options(
+        state.get("request"),
+        trace_options,
+        trace_source,
+        fallback_options,
+    )
+
+    grounded_answer = _render_ecommerce_final_answer_with_llm(
+        state.get("request"),
+        ecommerce_options,
+        model_name=model_name,
+    )
+    rendered_answer = _render_ecommerce_final_answer(state.get("request"), ecommerce_options)
+    final_answer = grounded_answer or rendered_answer or text
 
     if debug:
         print("Ecommerce Node DB Path:", db_path)
-        print("Ecommerce Node Advice:", text)
+        print("Ecommerce Node Advice (LLM Raw):", text)
         print("Ecommerce Node Final:", final_answer)
+        print("Ecommerce Node Options Source:", options_source)
         print("===============================================================")
 
-    return {
+    result = {
         "messages": [AIMessage(content=final_answer)],
-        "ecommerce_advice": text,
+        "ecommerce_advice": final_answer,
         "final_answer": final_answer,
         "ecommerce_options": ecommerce_options,
+        "ecommerce_options_source": options_source,
     }
+    if debug:
+        result["ecommerce_advice_llm_raw"] = text
+        result["ecommerce_advice_source"] = (
+            "llm_grounded" if grounded_answer else ("deterministic_fallback" if rendered_answer else "agent_text")
+        )
+    return result
