@@ -37,6 +37,20 @@ def _build_system_prompt() -> str:
         "- End with an overall assessment: what use case this build suits (FHD/2K/4K gaming, editing, office, etc.), "
         "its strengths, potential bottlenecks or things to watch out for, and whether better alternatives exist.\n"
         "\n"
+        "===== DIRECT PRODUCT INQUIRY (SINGLE COMPONENT FOCUS) =====\n"
+        "When the user asks about a specific product/component directly (e.g., \"analyze RTX 5070 Ti\", "
+        "\"tell me about 7800X3D\", \"is this cooler good?\"), you MUST follow these rules:\n"
+        "- **ONLY integrate the specialist output that matches the component the user is asking about.**\n"
+        "  For example, if the user asks about RTX 5070 Ti, use ONLY the GPU specialist output.\n"
+        "  Ignore all other specialist outputs (CPU, Memory, Storage, Cooling) even if they are non-empty — "
+        "  those are from previous unrelated queries.\n"
+        "- **Do NOT** pull in CPU, motherboard, RAM, storage, cooler, or any other component analysis "
+        "  unless the user explicitly asked about them.\n"
+        "- Do NOT output a \"platform overview\" or list unrelated components from past configurations.\n"
+        "- If the user only asked about one component, your output should focus solely on that component.\n"
+        "- Exceptions: you may mention compatibility (e.g., GPU needs a PSU with enough wattage) "
+        "  only as it relates to the component in question, but keep it brief.\n"
+        "\n"
         "===== PRODUCT PRICE QUERY / SIMILAR MODEL PRICE REFERENCE =====\n"
         "When the user asks about a specific product's price and ecommerce_advice clearly indicates "
         "\"no exact match found\" (exact_match=false / spec_match=false / fallback_used=true):\n"
@@ -76,6 +90,9 @@ def _build_system_prompt() -> str:
         "- If there is nothing new to add, that subsection may be omitted entirely.\n"
         "\n"
         "Output structure depends on the scenario:\n"
+        "(0) Direct product inquiry (user asks about a single specific component):\n"
+        "  1. Component analysis (use ONLY the matching specialist output — ignore all others)\n"
+        "  2. Summary & recommendation\n"
         "(1) Article build query (when PC_Board or CPU/GPU specialist has content + user asks about config):\n"
         "  1. Article build overview (list the build's parts and price ranges from the article)\n"
         "  2. Per-component detailed analysis (one paragraph per category with specialist content, "
@@ -103,20 +120,32 @@ def _build_integrator_user_context(state: dict) -> str:
     ecommerce 區塊只有在 ``state['ecommerce_advice']`` 非空時才加入,
     避免空字串干擾整合。
     """
+    route_targets = state.get("route_targets") or []
+
+    # Only include specialist outputs whose corresponding node was targeted by the router.
+    # This prevents stale outputs from previous queries from leaking into the integrator context.
+    def _include_if_targeted(target_key: str, state_key: str, label: str) -> str:
+        if target_key in route_targets:
+            value = (state.get(state_key) or "").strip()
+            return f"{label}: {value}" if value else f"{label}: (empty)"
+        return ""
+
     sections = [
         f"User request: {state.get('request', '')}",
         f"Planner: {state.get('plan', '')}",
         (
-            f"Router targets: {', '.join(state.get('route_targets', []))}\n"
+            f"Router targets: {', '.join(route_targets)}\n"
             f"Router reason: {state.get('route_reason', '')}"
         ),
-        f"PC_Board response: {state.get('pc_board_response', '')}",
-        f"CPU specialist: {state.get('cpu_advice', '')}",
-        f"GPU specialist: {state.get('gpu_advice', '')}",
-        f"Memory specialist: {state.get('memory_advice', '')}",
-        f"Storage specialist: {state.get('storage_advice', '')}",
-        f"Cooling specialist: {state.get('cooling_advice', '')}",
+        _include_if_targeted("pc_board", "pc_board_response", "PC_Board response"),
+        _include_if_targeted("cpu_specialist", "cpu_advice", "CPU specialist"),
+        _include_if_targeted("gpu_specialist", "gpu_advice", "GPU specialist"),
+        _include_if_targeted("memory_specialist", "memory_advice", "Memory specialist"),
+        _include_if_targeted("storage_specialist", "storage_advice", "Storage specialist"),
+        _include_if_targeted("cooling_specialist", "cooling_advice", "Cooling specialist"),
     ]
+    # Remove empty strings
+    sections = [s for s in sections if s]
 
     ecommerce_advice = (state.get("ecommerce_advice") or "").strip()
     if ecommerce_advice:

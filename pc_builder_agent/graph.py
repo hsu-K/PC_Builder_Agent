@@ -291,6 +291,7 @@ def build_graph(model_name: str | None = None, debug: bool = False):
     graph.add_edge("memory_specialist", "router")
     graph.add_edge("storage_specialist", "router")
     graph.add_edge("cooling_specialist", "router")
+    # graph.add_edge("integrator", END)
     graph.add_edge("integrator", "component_parser")
     graph.add_edge("component_parser", END)
 
