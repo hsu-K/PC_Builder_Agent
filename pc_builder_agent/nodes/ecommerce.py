@@ -370,6 +370,7 @@ def ecommerce_node(
     if debug:
         print("Ecommerce Node DB Path:", db_path)
         print("Ecommerce Node Advice:", text)
+        print("Ecommerce Node Structured Options:", ecommerce_options)
         print("===============================================================")
 
     return {
