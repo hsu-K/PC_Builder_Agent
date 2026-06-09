@@ -62,7 +62,7 @@ def _parse_nrec(nrec_el) -> int:
     if text.startswith("X"):
         try:
             return -int(text[1:])
-        except ValueError, IndexError:
+        except (ValueError, IndexError):
             return 0
     try:
         return int(text)
