@@ -12,7 +12,9 @@ run_agent_turn() / TOOL_LOOKUP 呼叫。本層只負責:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from langchain_core.tools import tool
 
@@ -67,6 +69,309 @@ _NO_PRODUCTS_MESSAGE = (
     "  uv run python -m pc_builder_agent.tools.ecommerce_update --write --db-path pc_builder_agent/data/ecommerce.db\n"
     "匯入商品後再查詢。(seed demo data 僅為 fallback / 示範,非正式商品資料。)"
 )
+
+
+_CATEGORY_OUTPUT_KEYS = {
+    "CPU": "cpu",
+    "GPU": "gpu",
+    "Motherboard": "motherboard",
+    "RAM": "memory",
+    "Storage": "storage",
+    "PSU": "psu",
+    "Case": "case",
+    "Cooler": "cooler",
+}
+_CATEGORY_LABEL_ZH = {
+    "CPU": "處理器",
+    "GPU": "顯示卡",
+    "Motherboard": "主機板",
+    "RAM": "記憶體",
+    "Storage": "儲存裝置",
+    "PSU": "電源供應器",
+    "Case": "機殼",
+    "Cooler": "散熱器",
+}
+
+
+def _frontend_category(category: str | None) -> str | None:
+    if not category:
+        return None
+    return _CATEGORY_OUTPUT_KEYS.get(str(category), str(category).strip().lower() or None)
+
+
+def _price_text(price: Any) -> str | None:
+    if isinstance(price, int):
+        return f"{price:,} 元"
+    return None
+
+
+def _specs_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _compatibility_notes_from_product(product: dict[str, Any]) -> str | None:
+    specs = _specs_dict(product.get("specs"))
+    notes: list[str] = []
+    if specs.get("platform"):
+        notes.append(f"平台 {specs['platform']}")
+    elif specs.get("socket"):
+        notes.append(f"socket {specs['socket']}")
+    if specs.get("memory_generation") and specs.get("memory_generation") != "DDR4_or_DDR5":
+        notes.append(str(specs["memory_generation"]))
+    if specs.get("chipset"):
+        notes.append(f"晶片組 {specs['chipset']}")
+    if specs.get("interface"):
+        notes.append(f"介面 {specs['interface']}")
+    if specs.get("capacity"):
+        notes.append(f"容量 {specs['capacity']}")
+    return " / ".join(notes) if notes else None
+
+
+def _reason_from_product(product: dict[str, Any], *, exact_match: bool | None = None, fallback_used: bool | None = None) -> str | None:
+    category = product.get("category")
+    specs = _specs_dict(product.get("specs"))
+    if exact_match:
+        return "資料庫中有對應商品，可直接作為查詢結果。"
+    if category == "Motherboard":
+        bits = [specs.get("chipset"), specs.get("memory_generation"), specs.get("socket")]
+        bits = [str(x) for x in bits if x]
+        if bits:
+            return "相近主機板候選，規格接近 " + " / ".join(bits) + "。"
+    if category == "RAM":
+        bits = [specs.get("memory_generation"), specs.get("capacity"), specs.get("speed")]
+        bits = [str(x) for x in bits if x]
+        if bits:
+            return "符合記憶體查詢條件，重點規格為 " + " / ".join(bits) + "。"
+    if category == "Storage":
+        bits = [specs.get("capacity"), specs.get("interface"), specs.get("form_factor")]
+        bits = [str(x) for x in bits if x]
+        if bits:
+            return "符合儲存裝置查詢條件，重點規格為 " + " / ".join(bits) + "。"
+    if category == "GPU" and product.get("model"):
+        return f"相近顯示卡候選，型號族群接近 {product.get('model')}。"
+    if category == "CPU" and product.get("model"):
+        return f"相近處理器候選，型號族群接近 {product.get('model')}。"
+    if fallback_used:
+        return "沒有完全相同型號時的相近商品候選。"
+    return None
+
+
+def _structured_item_from_product(
+    product: dict[str, Any],
+    *,
+    category: str | None = None,
+    exact_match: bool | None = None,
+    fallback_used: bool | None = None,
+    reason: str | None = None,
+    compatibility_notes: str | None = None,
+) -> dict[str, Any]:
+    item = sanitize_product_for_llm(product) if "product_name" in product else dict(product)
+    specs = _specs_dict(item.get("specs"))
+    raw_category = category or item.get("category")
+    out = {
+        "name": item.get("product_name") or item.get("name"),
+        "price": item.get("price"),
+        "price_text": _price_text(item.get("price")),
+        "category": _frontend_category(raw_category),
+        "category_key": raw_category,
+        "brand": item.get("brand"),
+        "source": item.get("source"),
+        "source_url": item.get("url") or item.get("source_url") or "",
+        "reason": reason or item.get("reason") or _reason_from_product(item, exact_match=exact_match, fallback_used=fallback_used),
+        "compatibility_notes": compatibility_notes or item.get("compatibility_notes") or _compatibility_notes_from_product(item),
+        "model": item.get("model"),
+        "platform": specs.get("platform") or item.get("platform"),
+        "socket": specs.get("socket") or item.get("socket"),
+        "memory_generation": specs.get("memory_generation") or item.get("memory_generation"),
+        "chipset": specs.get("chipset"),
+        "capacity": specs.get("capacity"),
+        "interface": specs.get("interface"),
+        "stock_status": item.get("stock_status"),
+    }
+    return out
+
+
+def build_ecommerce_options_from_search_result(
+    result: dict[str, Any] | list[dict[str, Any]] | str,
+    *,
+    query: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    if isinstance(result, str):
+        return {
+            "mode": "product_search",
+            "query": query,
+            "category": _frontend_category(category),
+            "category_key": category,
+            "exact_match": False,
+            "high_confidence_match": False,
+            "fallback_used": False,
+            "items": [],
+            "summary": result,
+            "warnings": [result],
+        }
+
+    payload = result if isinstance(result, dict) else {"products": result}
+    raw_category = payload.get("category") or category
+    products = payload.get("products") or []
+    exact_match = payload.get("exact_match")
+    fallback_used = payload.get("fallback_used")
+    warning = payload.get("warning")
+    warnings = [warning] if warning else []
+    items = [
+        _structured_item_from_product(
+            product,
+            category=raw_category,
+            exact_match=bool(exact_match),
+            fallback_used=bool(fallback_used),
+        )
+        for product in products
+    ]
+    zh = _CATEGORY_LABEL_ZH.get(raw_category, raw_category or "商品")
+    if items and exact_match:
+        summary = f"找到 {len(items)} 個符合查詢的{zh}商品。"
+    elif items and warning:
+        summary = warning
+    elif items:
+        summary = f"找到 {len(items)} 個{zh}候選商品。"
+    else:
+        summary = warning or _NO_RESULT_MESSAGE
+    return {
+        "mode": "product_search",
+        "query": payload.get("query") or query,
+        "category": _frontend_category(raw_category),
+        "category_key": raw_category,
+        "exact_match": bool(exact_match),
+        "high_confidence_match": bool(payload.get("high_confidence_match")),
+        "fallback_used": bool(fallback_used),
+        "matched_strategy": payload.get("matched_strategy"),
+        "items": items,
+        "summary": summary,
+        "warnings": warnings,
+    }
+
+
+def build_ecommerce_options_from_build_result(result: dict[str, Any] | str, *, query: str | None = None) -> dict[str, Any]:
+    if isinstance(result, str):
+        return {
+            "mode": "build_plan",
+            "query": query,
+            "category": "build",
+            "category_key": "Build",
+            "exact_match": None,
+            "high_confidence_match": None,
+            "fallback_used": False,
+            "items": [],
+            "summary": result,
+            "warnings": [result],
+        }
+    build = result.get("build") or []
+    items = [
+        _structured_item_from_product(
+            item,
+            category=item.get("category"),
+            reason=item.get("reason") or "完整菜單候選零件。",
+            compatibility_notes=_compatibility_notes_from_product(item),
+        )
+        for item in build
+    ]
+    warnings = [str(w) for w in result.get("warnings") or []]
+    total_price = result.get("total_price")
+    summary = result.get("explanation") or f"產生 {len(items)} 個零件的完整菜單候選。"
+    return {
+        "mode": "build_plan",
+        "query": query,
+        "category": "build",
+        "category_key": "Build",
+        "exact_match": None,
+        "high_confidence_match": None,
+        "fallback_used": False,
+        "items": items,
+        "summary": summary,
+        "warnings": warnings,
+        "total_price": total_price,
+        "total_price_text": _price_text(total_price),
+        "budget": result.get("budget"),
+        "budget_min": result.get("budget_min"),
+        "budget_max": result.get("budget_max"),
+        "platform": result.get("platform"),
+        "compatibility": result.get("compatibility"),
+        "in_budget_range": result.get("in_budget_range"),
+    }
+
+
+def build_ecommerce_options_from_component_options(result: dict[str, Any] | str, *, query: str | None = None) -> dict[str, Any]:
+    if isinstance(result, str):
+        return {
+            "mode": "component_options",
+            "query": query,
+            "category": None,
+            "category_key": None,
+            "exact_match": None,
+            "high_confidence_match": None,
+            "fallback_used": False,
+            "items": [],
+            "summary": result,
+            "warnings": [result],
+        }
+    raw_category = result.get("category")
+    options = result.get("options") or []
+    items = [
+        _structured_item_from_product(
+            option,
+            category=raw_category,
+            reason=option.get("reason"),
+            compatibility_notes=option.get("compatibility_notes"),
+        )
+        for option in options
+    ]
+    return {
+        "mode": "component_options",
+        "query": query,
+        "category": _frontend_category(raw_category),
+        "category_key": raw_category,
+        "exact_match": None,
+        "high_confidence_match": None,
+        "fallback_used": False,
+        "items": items,
+        "summary": result.get("next_step_suggestion") or f"找到 {len(items)} 個{_CATEGORY_LABEL_ZH.get(raw_category, raw_category or '零件')}候選。",
+        "warnings": [str(w) for w in result.get("warnings") or []],
+        "constraints_applied": result.get("constraints_applied") or [],
+    }
+
+
+def extract_structured_ecommerce_options(
+    result: dict[str, Any] | list[dict[str, Any]] | str | None,
+    *,
+    query: str | None = None,
+    category: str | None = None,
+    mode: str | None = None,
+) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    if isinstance(result, dict) and isinstance(result.get("ecommerce_options"), dict):
+        return result["ecommerce_options"]
+    resolved_mode = mode
+    if resolved_mode is None and isinstance(result, dict):
+        if "build" in result:
+            resolved_mode = "build_plan"
+        elif "options" in result:
+            resolved_mode = "component_options"
+        else:
+            resolved_mode = "product_search"
+    if resolved_mode == "build_plan":
+        return build_ecommerce_options_from_build_result(result, query=query)
+    if resolved_mode == "component_options":
+        return build_ecommerce_options_from_component_options(result, query=query)
+    return build_ecommerce_options_from_search_result(result, query=query, category=category)
 
 
 def _clamp_limit(limit: int) -> int:
@@ -177,19 +482,25 @@ def search_ecommerce_products(
             db_path=db_path,
         )
         sanitized_products = [sanitize_product_for_llm(item) for item in result.get("products") or []]
+        payload = {
+            "query": result.get("query"),
+            "category": result.get("category"),
+            "exact_match": bool(result.get("exact_match")),
+            "high_confidence_match": bool(result.get("high_confidence_match")),
+            "fallback_used": bool(result.get("fallback_used")),
+            "warning": result.get("warning"),
+            "matched_strategy": result.get("matched_strategy"),
+            "inferred_tokens": result.get("inferred_tokens"),
+            "products": sanitized_products,
+        }
+        payload["ecommerce_options"] = build_ecommerce_options_from_search_result(
+            payload,
+            query=str(keyword).strip(),
+            category=category,
+        )
         if sanitized_products:
-            return {
-                "query": result.get("query"),
-                "category": result.get("category"),
-                "exact_match": bool(result.get("exact_match")),
-                "high_confidence_match": bool(result.get("high_confidence_match")),
-                "fallback_used": bool(result.get("fallback_used")),
-                "warning": result.get("warning"),
-                "matched_strategy": result.get("matched_strategy"),
-                "inferred_tokens": result.get("inferred_tokens"),
-                "products": sanitized_products,
-            }
-        return result.get("warning") or _NO_RESULT_MESSAGE
+            return payload
+        return payload
 
     results = query_products(
         keyword=keyword,
@@ -202,9 +513,41 @@ def search_ecommerce_products(
     )
 
     if not results:
-        return _NO_RESULT_MESSAGE
+        empty_payload = {
+            "query": keyword,
+            "category": category,
+            "exact_match": False,
+            "high_confidence_match": False,
+            "fallback_used": False,
+            "warning": _NO_RESULT_MESSAGE,
+            "matched_strategy": None,
+            "inferred_tokens": None,
+            "products": [],
+        }
+        empty_payload["ecommerce_options"] = build_ecommerce_options_from_search_result(
+            empty_payload,
+            query=keyword,
+            category=category,
+        )
+        return empty_payload
 
-    return [sanitize_product_for_llm(item) for item in results]
+    payload = {
+        "query": keyword,
+        "category": category,
+        "exact_match": False,
+        "high_confidence_match": False,
+        "fallback_used": False,
+        "warning": None,
+        "matched_strategy": None,
+        "inferred_tokens": None,
+        "products": [sanitize_product_for_llm(item) for item in results],
+    }
+    payload["ecommerce_options"] = build_ecommerce_options_from_search_result(
+        payload,
+        query=keyword,
+        category=category,
+    )
+    return payload
 
 
 @tool
@@ -323,6 +666,11 @@ def recommend_pc_build_tool(
         # 優惠試算:新增 estimated_* 欄位,絕不覆蓋 total_price
         if estimate_promotions:
             result.update(estimate_promotion_adjusted_total(result))
+    if isinstance(result, dict):
+        result["ecommerce_options"] = build_ecommerce_options_from_build_result(
+            result,
+            query=f"budget={budget};use_case={use_case}",
+        )
     return result
 
 
@@ -508,7 +856,7 @@ def recommend_component_options_tool(
     _msg = _no_data_message(db_path)
     if _msg:
         return _msg
-    return recommend_component_options(
+    result = recommend_component_options(
         target_category=target_category,
         budget=budget,
         use_case=use_case,
@@ -527,6 +875,12 @@ def recommend_component_options_tool(
         limit=_clamp_options_limit(limit),
         db_path=db_path,
     )
+    if isinstance(result, dict):
+        result["ecommerce_options"] = build_ecommerce_options_from_component_options(
+            result,
+            query=target_category,
+        )
+    return result
 
 
 @tool
