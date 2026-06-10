@@ -33,11 +33,21 @@ class PC_Builder_Agent:
         messages: list[BaseMessage],
         #parts: PCParts = {},
         preference={},
+        articles: list = None,
     ):
         self.state = {
             "profile_id": id,
             "preferences": preference,
-            "pc_board_response": self.state.get("pc_board_response", ""),
+            "pc_board_results": articles or [],
+            # 每回合重置路由控制欄位，避免 LangGraph checkpoint 沿用上一輪的舊值
+            # （與 chatbot.py 的 run_chat 迴圈中重置邏輯一致）
+            "pc_board_response": "",
+            "route_targets": [],
+            "route_reason": "",
+            "execution_order": [],
+            "pending_route_targets": [],
+            "completed_route_targets": [],
+            "routing_started": False,
             "request": messages[-1].content,
             "messages": messages,
         }

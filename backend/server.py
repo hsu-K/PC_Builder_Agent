@@ -30,9 +30,8 @@ class ChatMessage(BaseModel):
     id: str
     messages: list[Message]
     preference: dict = {}       # 偏好設置
-    pc_board_response: str
-    # build: PCParts|None=None
-    # 其他資訊
+    pc_board_response: str = ""
+    pc_board_articles: list = []  # 前端爬取的文章
 
 class FetchArticlesRequest(BaseModel):
     id: str                    # 使用者 session ID
@@ -54,7 +53,8 @@ async def chat(chatMessage: ChatMessage):
         message = agent.generate(
             id=chatMessage.id,
             messages=messages,
-            preference={**chatMessage.preference, "pc_board_response": chatMessage.pc_board_response}
+            preference={**chatMessage.preference, "pc_board_response": chatMessage.pc_board_response},
+            articles=chatMessage.pc_board_articles,
         )
         state = agent.get_state()
         agent.update_state(state)
