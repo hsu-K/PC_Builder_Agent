@@ -52,7 +52,12 @@ export function ActiveChatProvider({ children }) {
 
   const setPreference = useCallback(
     (preference) => {
-      updateChat({ preference: { ...activeChat.preference, ...preference } })
+      const updates = { preference: { ...activeChat.preference, ...preference } }
+      // 同步 preference.budget 到頂層 budget，讓 PartsPanel 的 BudgetBar 顯示正確預算
+      if (preference.budget !== undefined) {
+        updates.budget = Number(preference.budget) || 0
+      }
+      updateChat(updates)
     },
     [activeChat.preference, updateChat]
   )

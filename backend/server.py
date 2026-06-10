@@ -58,9 +58,23 @@ async def chat(chatMessage: ChatMessage):
         )
         state = agent.get_state()
         agent.update_state(state)
+
+        # 將 component_options 轉為前端 PartsPanel 所需的 options 格式
+        component_options = state.get("component_options") or {}
+        # 只留 frontend 對應的 key，確保 value 是 list
+        frontend_options = {}
+        frontend_parts = {}
+        for key, items in component_options.items():
+            if isinstance(items, list) and len(items) > 0:
+                frontend_options[key] = items
+                # 預設選取每個類別的第一個商品
+                frontend_parts[key] = items[0]
+
         response = {
             **state,
-            'message':message,
+            'message': message,
+            'options': frontend_options,
+            'parts': frontend_parts,
         }
     except Exception as e:
         response = {"error": str(e)}  # e 要轉 str

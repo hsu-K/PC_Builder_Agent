@@ -69,7 +69,9 @@ class PC_Builder_Agent:
             else final_answer
         ) or result.get("pc_board_response") or "ERROR"
 
-        self.state["pc_board_response"] += '\n' + result.get("pc_board_response", "")
+        # 將 graph 執行結果合併回 self.state，讓 get_state() 能拿到
+        # component_options / parsed_components 等節點輸出
+        self.state.update(result)
 
         return response
     

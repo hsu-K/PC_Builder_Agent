@@ -17,6 +17,7 @@ Component Parser Node - 解析 Integrator 的最終回答，擷取其中提到�
 """
 
 import json
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -25,34 +26,90 @@ from pc_builder_agent.nodes.base import build_model, message_text
 
 from pc_builder_agent.nodes.ecommerce import ecommerce_node
 
-def find_related_goods(good_list: list[str]) -> dict[str, list[dict[str, str]]]:
-    """對每個零件名稱查詢電商，回傳以 category 為 key 的分類結果。
+# ecommerce 回傳的 category 對應到前端 PartsPanel 的 key
+# 包含 _CATEGORY_OUTPUT_KEYS 和 _frontend_category() 的所有可能輸出值
+_CATEGORY_TO_FRONTEND_KEY: dict[str, str] = {
+    # 標準大寫（_CATEGORY_OUTPUT_KEYS / _CATEGORY_LABEL_ZH 的 key）
+    "CPU": "cpu",
+    "GPU": "gpu",
+    "Motherboard": "mb",
+    "RAM": "ram",
+    "Storage": "ssd",
+    "PSU": "psu",
+    "Case": "case",
+    "Cooler": "cooler",
+    # _frontend_category() 輸出的小寫別名
+    "cpu": "cpu",
+    "gpu": "gpu",
+    "motherboard": "mb",
+    "memory": "ram",
+    "storage": "ssd",
+    "psu": "psu",
+    "case": "case",
+    "cooler": "cooler",
+}
+
+
+def _parse_price_to_int(price_text: str) -> int:
+    """將價格字串（如 'NT$32,990'、'12900 元'）解析為整數。"""
+    if not price_text:
+        return 0
+    # 移除 NT$、$、元、逗號等非數字字元，取第一個數字
+    nums = re.findall(r"\d+", str(price_text).replace(",", ""))
+    return int(nums[0]) if nums else 0
+
+
+def find_related_goods(good_list: list[str], *, debug: bool = False) -> dict[str, list[dict[str, Any]]]:
+    """對每個零件名稱查詢電商，回傳以 frontend key 為 key 的分類結果。
 
     Returns:
-        dict, e.g. {"GPU": [{"name": "RTX 5080", "price": "NT$32,990"}, ...], "CPU": [...]}
+        dict, e.g. {"gpu": [{"name": "RTX 5080", "price": 32990}, ...], "cpu": [...]}
     """
-    result_by_category: dict[str, list[dict[str, str]]] = {}
+    result_by_frontend_key: dict[str, list[dict[str, Any]]] = {}
+
+    if debug:
+        print(f"  [find_related_goods] 準備查詢 {len(good_list)} 個零件：{good_list}")
 
     for good in good_list:
         state = {"request": f"查{good}的相關產品"}
         result = ecommerce_node(state, model_name="gpt-4.1-mini", debug=False)
 
         ecommerce_options = result.get("ecommerce_options")
+        if debug:
+            has_options = bool(ecommerce_options)
+            item_count = len(ecommerce_options.get("items", [])) if ecommerce_options else 0
+            category = ecommerce_options.get("category", "N/A") if ecommerce_options else "N/A"
+            print(f"  [find_related_goods] '{good}' → ecommerce_options={'有' if has_options else '無'}, "
+                  f"category={category}, items={item_count}")
+
         if not ecommerce_options:
             continue
 
-        category = ecommerce_options.get("category", "Other")
-        if category not in result_by_category:
-            result_by_category[category] = []
+        raw_category = ecommerce_options.get("category", "Other")
+        frontend_key = _CATEGORY_TO_FRONTEND_KEY.get(raw_category)
+        if not frontend_key:
+            if debug:
+                print(f"  [find_related_goods] '{good}' → 無法對應 category '{raw_category}' 到前端 key，跳過")
+            continue
+
+        if frontend_key not in result_by_frontend_key:
+            result_by_frontend_key[frontend_key] = []
 
         for item in ecommerce_options.get("items", []):
-            price = item.get("price_text") or f"{item.get('price', 'N/A')} 元"
-            result_by_category[category].append({
+            price_text = item.get("price_text") or f"{item.get('price', 'N/A')} 元"
+            result_by_frontend_key[frontend_key].append({
                 "name": item.get("name", ""),
-                "price": price,
+                "price": _parse_price_to_int(price_text),
+                "price_text": price_text,
+                "source": item.get("source", ""),
+                "url": item.get("url", ""),
             })
 
-    return result_by_category
+    if debug:
+        print(f"  [find_related_goods] 最終回傳 {len(result_by_frontend_key)} 個類別："
+              f"{list(result_by_frontend_key.keys())}")
+
+    return result_by_frontend_key
 
 def _build_parser_system_prompt() -> str:
     """組出 component parser 的 system prompt。"""
@@ -146,19 +203,25 @@ def component_parser_node(
     for comp in parsed.get("components", []):
         component_list.append(comp["name"])
 
-    good_list = find_related_goods(component_list)
-
     if debug:
         print("【Component Parser】解析結果：")
         print(json.dumps(parsed, ensure_ascii=False, indent=2))
+        print(f"【Component Parser】擷取到的零件名稱列表 (共 {len(component_list)} 個)：{component_list}")
+
+    good_list = find_related_goods(component_list, debug=debug)
+
+    if debug:
         print("【Component Parser】相關商品查詢結果：")
+        if not good_list:
+            print("  (無結果 — good_list 為空 dict)")
         for category, items in good_list.items():
             print(f"  {category}:")
             for item in items:
-                print(f"    - {item['name']} ({item['price']})")
+                print(f"    - {item['name']} ({item['price_text']})")
         print("=" * 60)
 
     return {
         "parsed_components": parsed,
+        "component_options": good_list,
         "messages": [AIMessage(content=json.dumps(parsed, ensure_ascii=False))],
     }

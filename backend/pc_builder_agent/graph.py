@@ -106,6 +106,7 @@ class BuildState(TypedDict, total=False):
     final_answer: str
     
     parsed_components: dict
+    component_options: dict
     
     ecommerce_advice: str
     ecommerce_db_path: str
