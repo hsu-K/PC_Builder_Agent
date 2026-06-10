@@ -14,43 +14,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import uuid
 
 from dotenv import load_dotenv
 
 # 在模組載入時讀取 .env(讓 os.getenv() 取得 OPENAI_API_KEY / OPENAI_MODEL)
 load_dotenv()
 
-from pc_builder_agent.graph import build_graph
 from pc_builder_agent.chatbot import run_chat
-from pc_builder_agent.tools.ecommerce_db import DEFAULT_DB_PATH
-
-
-# ============================================================================
-# 正式互動式選件 CLI(python -m pc_builder_agent.cli)
-# ============================================================================
-
-_BANNER = (
-    "=" * 60 + "\n"
-    "PC Builder 互動式選件\n"
-    + "=" * 60 + "\n"
-    "輸入需求開始,例如:\n"
-    "  我預算 30000,要組遊戲機,但我想自己挑零件,請從 CPU 開始。\n"
-    "  我預算 20000,要組中低階文書機,請從 CPU 開始。\n"
-    "\n"
-    "指令:\n"
-    "  reset   重置目前選件流程(換新 session)\n"
-    "  status  顯示目前 thread_id 與已選零件\n"
-    "  exit    離開(或 quit / q)\n"
-    + "=" * 60
-)
-
-
-def _new_thread_id() -> str:
-    return "cli-" + uuid.uuid4().hex[:8]
-
-
-
 
 
 

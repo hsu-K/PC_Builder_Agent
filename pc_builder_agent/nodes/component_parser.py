@@ -23,6 +23,36 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from pc_builder_agent.nodes.base import build_model, message_text
 
+from pc_builder_agent.nodes.ecommerce import ecommerce_node
+
+def find_related_goods(good_list: list[str]) -> dict[str, list[dict[str, str]]]:
+    """對每個零件名稱查詢電商，回傳以 category 為 key 的分類結果。
+
+    Returns:
+        dict, e.g. {"GPU": [{"name": "RTX 5080", "price": "NT$32,990"}, ...], "CPU": [...]}
+    """
+    result_by_category: dict[str, list[dict[str, str]]] = {}
+
+    for good in good_list:
+        state = {"request": f"查{good}的相關產品"}
+        result = ecommerce_node(state, model_name="gpt-4.1-mini", debug=False)
+
+        ecommerce_options = result.get("ecommerce_options")
+        if not ecommerce_options:
+            continue
+
+        category = ecommerce_options.get("category", "Other")
+        if category not in result_by_category:
+            result_by_category[category] = []
+
+        for item in ecommerce_options.get("items", []):
+            price = item.get("price_text") or f"{item.get('price', 'N/A')} 元"
+            result_by_category[category].append({
+                "name": item.get("name", ""),
+                "price": price,
+            })
+
+    return result_by_category
 
 def _build_parser_system_prompt() -> str:
     """組出 component parser 的 system prompt。"""
@@ -112,9 +142,20 @@ def component_parser_node(
             "summary": f"解析失敗，LLM 原始回覆：{raw[:200]}",
         }
 
+    component_list = []
+    for comp in parsed.get("components", []):
+        component_list.append(comp["name"])
+
+    good_list = find_related_goods(component_list)
+
     if debug:
         print("【Component Parser】解析結果：")
         print(json.dumps(parsed, ensure_ascii=False, indent=2))
+        print("【Component Parser】相關商品查詢結果：")
+        for category, items in good_list.items():
+            print(f"  {category}:")
+            for item in items:
+                print(f"    - {item['name']} ({item['price']})")
         print("=" * 60)
 
     return {
