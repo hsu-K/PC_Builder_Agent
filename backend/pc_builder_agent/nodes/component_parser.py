@@ -97,12 +97,33 @@ def find_related_goods(good_list: list[str], *, debug: bool = False) -> dict[str
 
         for item in ecommerce_options.get("items", []):
             price_text = item.get("price_text") or f"{item.get('price', 'N/A')} 元"
+            name = item.get("name", "")
+            # 組成 detail：優先用 reason，其次 compatibility_notes
+            detail_parts = []
+            reason = (item.get("reason") or "").strip()
+            notes = (item.get("compatibility_notes") or "").strip()
+            if reason:
+                detail_parts.append(reason)
+            if notes:
+                detail_parts.append(notes)
+            detail = "\n".join(detail_parts) or f"{name} 的相關資訊"
+
+            # 組成 sources 陣列供 PartCard 顯示
+            sources = []
+            source_name = item.get("source", "")
+            source_url = item.get("source_url") or item.get("url", "")
+            if source_name:
+                sources.append({"title": source_name, "url": source_url})
+            # 如果有 source_url 但沒 source name，用網址當 title
+            elif source_url:
+                sources.append({"title": source_url, "url": source_url})
+
             result_by_frontend_key[frontend_key].append({
-                "name": item.get("name", ""),
+                "name": name,
                 "price": _parse_price_to_int(price_text),
                 "price_text": price_text,
-                "source": item.get("source", ""),
-                "url": item.get("url", ""),
+                "detail": detail,
+                "sources": sources,
             })
 
     if debug:

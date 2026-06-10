@@ -30,7 +30,29 @@ export function ActiveChatProvider({ children }) {
   const updateChat = useCallback(
     (changes) => {
       setChatHistory((prev) =>
-        prev.map((chat) => (chat.id === activeChatId ? { ...chat, ...changes } : chat))
+        prev.map((chat) => {
+          if (chat.id !== activeChatId) return chat
+          const merged = { ...chat, ...changes }
+          // parts：深度合併，新值蓋舊值（每個類別只保留最新選中的那一個）
+          if (changes.parts !== undefined) {
+            merged.parts = { ...chat.parts, ...changes.parts }
+          }
+          // options：append + 去重，不覆蓋既有選項
+          if (changes.options !== undefined) {
+            const nextOptions = { ...chat.options }
+            for (const [key, newItems] of Object.entries(changes.options)) {
+              if (!Array.isArray(newItems)) continue
+              const existing = nextOptions[key] || []
+              const existingNames = new Set(existing.map(item => item.name))
+              const toAppend = newItems.filter(item => !existingNames.has(item.name))
+              if (toAppend.length > 0) {
+                nextOptions[key] = [...existing, ...toAppend]
+              }
+            }
+            merged.options = nextOptions
+          }
+          return merged
+        })
       )
     },
     [activeChatId, setChatHistory]

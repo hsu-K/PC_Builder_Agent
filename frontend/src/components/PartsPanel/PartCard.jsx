@@ -49,24 +49,11 @@ export default function PartCard({ partKey, part, icon, options, onUpdate }) {
         </svg>
       </div>
 
-      <div className={styles.cardDetail}>
-        Part description:
-        <br></br>
-        
-        {part.detail}
-      </div>
-      
-      <div className={styles.cardSource}>
-        Source:
-        <br></br>
-        <ul>
-          { part.sources?.map((i, source) => (
-              <li key={i}><a href={source.url}>{source.title}</a></li>
-            ))
-          }
-
-        </ul>
-      </div>
+      { part.sources?.length > 0 && (
+        <div className={styles.cardSource}>
+          來源：{part.sources.map(s => s.title).join('、')}
+        </div>
+      )}
     </div>
   )
 }
