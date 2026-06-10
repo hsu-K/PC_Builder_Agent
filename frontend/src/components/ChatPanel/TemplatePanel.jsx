@@ -1,15 +1,15 @@
 import { useState } from 'react'
 import { HiOutlineTemplate } from 'react-icons/hi'
-import { MdOutlineGames, MdOutlineWork, MdOutlineAttachMoney, MdOutlineVideoLibrary, MdOutlineTune } from 'react-icons/md'
+import { MdOutlineGames, MdOutlineWork, MdOutlineAttachMoney, MdOutlineVideoLibrary, MdOutlineTune, MdOutlineCloudDownload } from 'react-icons/md'
 import styles from './TemplatePanel.module.css'
 
 const PRESET_TEMPLATES = [
   {
-    category: '電競',
+    category: '遊戲',
     icon: <MdOutlineGames size={13} />,
     items: [
-      { label: '高效能電競', text: '我想建一台高效能電競電腦，主要用來玩 4K 畫質的 3A 大作，預算約 NT$80,000。' },
-      { label: '入門電競',   text: '我想建一台入門電競電腦，玩 1080p 遊戲為主，預算 NT$30,000 以內。' },
+      { label: '高效能遊戲', text: '我想建一台高效能遊戲電腦，主要用來玩 4K 畫質的 3A 大作，預算約 NT$80,000。' },
+      { label: '入門遊戲',   text: '我想建一台入門遊戲電腦，玩 1080p 遊戲為主，預算 NT$30,000 以內。' },
     ]
   },
   {
@@ -38,7 +38,7 @@ const PRESET_TEMPLATES = [
   },
 ]
 
-const USAGE_OPTIONS   = ['電競', '影片剪輯', '3D 建模', 'AI 訓練', '程式開發', '文書辦公', '日常使用']
+const USAGE_OPTIONS   = ['遊戲', '影片剪輯', '3D 建模', 'AI 訓練', '程式開發', '文書辦公', '日常使用']
 const BRAND_OPTIONS   = ['Intel CPU', 'AMD CPU', 'NVIDIA GPU', 'AMD GPU', 'ASUS', 'MSI', 'Gigabyte', '不限']
 const PRIORITY_OPTIONS = ['效能優先', 'CP 值優先', '靜音優先', '體積優先', '外觀優先']
 
@@ -52,9 +52,11 @@ const DEFAULT_FORM = {
   extra: '',
 }
 
-export default function TemplatePanel({ preference, onSelect, onSavePreference }) {
+export default function TemplatePanel({ id, preference, onSelect, onSavePreference }) {
   const [tab, setTab] = useState('custom')   // 'custom' | 'preset'
   const [form, setForm] = useState({ ...DEFAULT_FORM, ...preference })
+  const [fetching, setFetching] = useState(false)
+  const [fetchResult, setFetchResult] = useState(null)  // { status, articles_count, message }
 
   const toggleBrand = (brand) => {
     setForm(prev => ({
@@ -85,6 +87,30 @@ export default function TemplatePanel({ preference, onSelect, onSavePreference }
       //onSelect(text)
       alert("已設定偏好設定：\n\n" + text)
       onSavePreference?.(form)
+    }
+  }
+
+  const handleFetchArticles = async () => {
+    setFetching(true)
+    setFetchResult(null)
+    try {
+      const res = await fetch('http://localhost:8000/fetch-articles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: String(id),
+          preference: {
+            budget: form.budget || undefined,
+            use_case: form.usage || undefined,
+          },
+        }),
+      })
+      const data = await res.json()
+      setFetchResult(data)
+    } catch (err) {
+      setFetchResult({ status: 'error', message: String(err), articles_count: 0, articles: [] })
+    } finally {
+      setFetching(false)
     }
   }
 
@@ -235,6 +261,14 @@ export default function TemplatePanel({ preference, onSelect, onSavePreference }
                 清除
               </button>
               <button
+                className={styles.fetchBtn}
+                disabled={fetching}
+                onClick={handleFetchArticles}
+              >
+                <MdOutlineCloudDownload size={13} />
+                {fetching ? '爬取中...' : '爬取文章'}
+              </button>
+              <button
                 className={styles.applyBtn}
                 disabled={!preview}
                 onClick={handleApply}
@@ -242,6 +276,14 @@ export default function TemplatePanel({ preference, onSelect, onSavePreference }
                 設定偏好
               </button>
             </div>
+            {fetchResult && (
+              <div className={`${styles.fetchResult} ${fetchResult.status === 'error' ? styles.fetchError : ''}`}>
+                {fetchResult.status === 'error'
+                  ? `⚠ ${fetchResult.message || '爬取失敗'}`
+                  : `✓ 成功爬取 ${fetchResult.articles_count} 篇文章`
+                }
+              </div>
+            )}
           </div>
 
         </div>

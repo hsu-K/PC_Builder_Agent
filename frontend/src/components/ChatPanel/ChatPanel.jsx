@@ -91,7 +91,7 @@ export default function ChatPanel({
       </div>
 
       {/* Input */}
-      <ChatInput preference={preference} onSend={handleSend} disabled={isLoading} onSavePreference={onPreferenceUpdate} />
+      <ChatInput id={id} preference={preference} onSend={handleSend} disabled={isLoading} onSavePreference={onPreferenceUpdate} />
 
     </div>
   )

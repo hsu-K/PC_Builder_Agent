@@ -252,6 +252,45 @@
   cursor: not-allowed;
 }
 
+.fetchBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #534AB7;
+  background: none;
+  border: 0.5px solid #534AB7;
+  border-radius: var(--border-radius-md);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+
+.fetchBtn:hover:not(:disabled) {
+  background: #EEEDF8;
+}
+
+.fetchBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fetchResult {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: #2E7D32;
+  background: #E8F5E9;
+  border-radius: var(--border-radius-md);
+  text-align: center;
+}
+
+.fetchError {
+  color: #C62828;
+  background: #FFEBEE;
+}
+
 /* ── Preset body ── */
 .presetBody {
   overflow-y: auto;
