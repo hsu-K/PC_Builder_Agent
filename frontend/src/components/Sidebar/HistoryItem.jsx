@@ -1,5 +1,4 @@
 import styles from './Sidebar.module.css'
-import { HiEllipsisVertical } from "react-icons/hi2";
 import { HiTrash } from "react-icons/hi2";
 
 
@@ -10,7 +9,7 @@ const TAG_STYLES = {
   創作: styles.tagCreate,
 }
 
-export default function HistoryItem({ build, isActive, onClick,  onDeleteItem}) {
+export default function HistoryItem({ build, isActive, onClick, onDeleteItem }) {
   const total = Object.values(build.parts).reduce((sum, p) => sum + p.price, 0)
   const partCount = Object.keys(build.parts).length
   const budgetPercent = Math.round((total / build.budget) * 100)
@@ -36,9 +35,9 @@ export default function HistoryItem({ build, isActive, onClick,  onDeleteItem}) 
               e.stopPropagation()
               onDeleteItem(build.id)
             }}
-             aria-label="刪除配置"  
+            aria-label="刪除配置"
           >
-            <HiTrash/>
+            <HiTrash color="#E53E3E" />
           </button>
         </div>
 
