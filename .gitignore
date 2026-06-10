@@ -11,4 +11,5 @@ wheels/
 .env
 .github
 pc_builder_agent/data/
+frontend/package-lock.json
 
