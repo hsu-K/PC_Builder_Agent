@@ -1,0 +1,326 @@
+.panel {
+  width: 400px;
+  height: 100%;
+  min-width: 290px;
+  display: flex;
+  flex-direction: column;
+  border-left: 0.5px solid var(--color-border-tertiary);
+  background: var(--color-background-primary);
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 14px 12px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  flex-shrink: 0;
+}
+
+.agentInfo {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.agentDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #1D9E75;
+  display: inline-block;
+}
+
+.agentName {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.agentStatus {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* ── Messages ── */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 12px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-secondary) transparent;
+}
+
+.messages::-webkit-scrollbar { width: 3px; }
+.messages::-webkit-scrollbar-thumb {
+  background: var(--color-border-secondary);
+  border-radius: 2px;
+}
+
+/* ── Suggestion chips ── */
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 0 4px;
+}
+
+.chip {
+  text-align: left;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.12s, color 0.12s;
+}
+
+.chip:hover {
+  background: var(--color-background-tertiary);
+  color: var(--color-text-primary);
+}
+
+
+/* ── Input area ── */
+.inputArea {
+  padding: 10px 10px 8px;
+  border-top: 0.5px solid var(--color-border-tertiary);
+  flex-shrink: 0;
+}
+
+.inputWrap {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  padding: 7px 8px;
+  transition: border-color 0.15s;
+}
+
+.inputWrap:focus-within {
+  border-color: #7F77DD;
+}
+
+.inputWrapDisabled {
+  opacity: 0.6;
+}
+
+.textarea {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--color-text-primary);
+  resize: none;
+  line-height: 1.5;
+  max-height: 96px;
+}
+
+.textarea::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.sendBtn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: #534AB7;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: white;
+  transition: background 0.15s;
+}
+
+.sendBtn:hover:not(:disabled) {
+  background: #3C3489;
+}
+
+.sendBtn:disabled {
+  background: var(--color-border-secondary);
+  cursor: not-allowed;
+}
+
+.sendBtn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.inputHint {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  margin-top: 5px;
+  padding: 0 2px;
+}
+
+/* ── Toolbar ── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 6px;
+}
+
+.toolBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  background: none;
+  border: 0.5px solid transparent;
+  border-radius: var(--border-radius-md);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.toolBtn:hover {
+  background: var(--color-background-secondary);
+  color: var(--color-text-primary);
+}
+
+.toolBtnActive {
+  background: var(--color-background-secondary);
+  border-color: var(--color-border-secondary);
+  color: var(--color-text-primary);
+}
+
+/* ── More menu ── */
+.moreWrap {
+  position: relative;
+}
+
+.moreMenu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  min-width: 120px;
+  z-index: 10;
+}
+
+.moreMenuItem {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  color: var(--color-text-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.moreMenuItem:hover {
+  background: var(--color-background-secondary);
+}
+
+/* ── Template panel ── */
+.templatePanel {
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-lg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 20;
+  overflow: hidden;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+}
+
+.templateHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  flex-shrink: 0;
+}
+
+.templateList {
+  overflow-y: auto;
+  padding: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-secondary) transparent;
+}
+
+.templateList::-webkit-scrollbar { width: 3px; }
+.templateList::-webkit-scrollbar-thumb {
+  background: var(--color-border-secondary);
+  border-radius: 2px;
+}
+
+.templateGroup {
+  margin-bottom: 4px;
+}
+
+.templateGroupLabel {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-tertiary);
+  padding: 6px 8px 4px;
+}
+
+.templateItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--border-radius-md);
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s;
+}
+
+.templateItem:hover {
+  background: var(--color-background-secondary);
+}
+
+.templateItemLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.templateItemText {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

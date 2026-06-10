@@ -1,11 +1,62 @@
-### PC_Builder_UI
-含前端與後端
+# PC Builder Agent
 
+> ⚠️ **接入外部（同學的）零件推薦邏輯前請先確認**
+>
+> 如果你現在還沒有把同學的程式碼放進 repo,那就先不要讓 Claude 硬接。你應該先問同學要:
+> 1. 檔案路徑
+> 2. 函式名稱
+> 3. 函式輸入格式
+> 4. 函式輸出格式
+> 5. 是否需要查 `data/ecommerce.db`
+>
+> 在拿到上述資訊前,系統會維持使用內建(legacy)推薦作為 fallback;接入方式見下方
+> 「[候選推薦可委派給外部 recommender](#候選推薦可委派給外部-recommenderadapter)」。
 
-#### 開啟 server(測試)
-```
-cd backend
-uv run uvicorn server:app --reload --port 8000
+## 簡介
+
+PC Builder Agent 是一個以節點（node）與工具（tool）為核心的模組化系統，用於根據使用者偏好與需求，提供 PC 組裝建議、爬取討論版文章、以及多角色代理（agent）式的互動流程。
+
+這是一個使用 LangGraph 建立的 multi-agent 起始範例，現在已串接 GPT API、工具呼叫與記憶體。
+
+它會使用同一個 session id 同時保存短期對話記憶與偏好資料，方便你重跑同一組設定時延續上下文。
+
+### 重點功能
+
+- **節點（Nodes）**：每個 node 負責一個職責（例如：爬蟲、專家回答、整合器等）。
+- **工具（Tools）**：輔助功能模組，可供 agent 呼叫（例如：爬蟲模擬、硬體資訊查詢）。
+- **狀態（state）**：中心化的作業狀態（包含 `preferences`、`profile_id` 等），節點間傳遞與共享。
+
+## 專案目錄（概要）
+
+- **`main.py`**: 程式進入點（示範或 CLI 啟動）。
+- **`pyproject.toml`**: 專案相依與建構設定。
+- **`pc_builder_agent/`**: 主程式套件目錄。
+  - **`nodes/`**: 節點實作目錄（例如爬蟲、專家、整合器）。
+  - **`tools/`**: 工具集合（給 agent 呼叫的外部功能或模擬器）。
+  - **`chatbot.py`, `cli.py`**: 與使用者互動的入口元件。
+  - **`data/articles/`**: 預設或已儲存的文章資料。
+
+## 運作流程（可直接到graph.py查看詳細流程）
+
+1. 首先從`preference.json`讀取使用者的偏好
+2. 根據偏好與需求呼叫`pc_board_scraper` 爬蟲 node，來爬取文章
+3. 進入chat模式，使用者透過 CLI 或 chat 介面發出需求。
+4. Router 決定需要啟動哪些 node（例如：若需要最新討論則啟動 `pc_board_scraper`）。
+5. Node 呼叫 `run_agent_turn()` 與 LLM 互動，並可選擇呼叫 `tools` 提供的功能（例如 `pc_board_scraper.invoke()`）。
+6. Node 處理結果並回寫到 `state`。
+7. 最終由`integrator node` 或回應流程將結果呈現給使用者。
+
+## 開發與執行
+
+```bash
+# 建立/同步虛擬環境並安裝相依
+uv sync
+
+# 執行主程式（範例）
+uv run main.py
+
+# 若要執行debug模式(輸出更多提示訊息)
+uv run main.py --debug
 ```
 
 ### 互動式選件 CLI（正式入口，推薦）
@@ -61,12 +112,9 @@ uv run python -m pc_builder_agent.cli
 
 ```bash
 uv run scripts/test_node.py
-#### UI建置(測試)
 ```
-cd frontend
 
-# 安裝依賴
-npm install
+如果要查看或修改測試腳本，請參考專案根目錄下的 `scripts/test_node.py`。
 
 ---
 
@@ -756,10 +804,3 @@ estimated_final_price  = 僅試算「可確認條件成立的高信心 bundle_di
 10. **尚未支援**欣亞 / PChome / momo 的 promotion。
 
 ---
-# 跑本地UI
-npm run dev
-```
-* 進入建置的本地UI網站: `http://localhost:5173/`
-  > 小提示: 網頁按 'F12` 可以看 console 來 debug
-* `frontend/src/hooks/useChat.js` 為前端對街後端的地方
-* 前端接收格式可參考`test_server/mock_data.json`

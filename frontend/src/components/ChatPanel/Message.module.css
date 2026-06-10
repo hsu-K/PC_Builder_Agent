@@ -1,0 +1,89 @@
+
+/* ── Message bubble ── */
+.msgWrap {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.msgWrapAgent {
+  align-self: flex-start;
+  max-width: 90%;
+}
+
+.msgWrapUser {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+  max-width: 85%;
+}
+
+.msgContent {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.bubble {
+  padding: 8px 11px;
+  font-size: 12px;
+  line-height: 1.55;
+  border-radius: var(--border-radius-md);
+  word-break: break-word;
+}
+
+.bubbleAgent {
+  background: var(--color-background-secondary);
+  color: var(--color-text-primary);
+  border-bottom-left-radius: 3px;
+}
+
+.bubbleUser {
+  background: #534AB7;
+  color: #fff;
+  border-bottom-right-radius: 3px;
+}
+
+.time {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  padding: 0 2px;
+}
+
+.timeUser {
+  text-align: right;
+}
+
+.timeAgent {
+  text-align: left;
+}
+
+/* ── Typing indicator ── */
+.typingWrap {
+  align-self: flex-start;
+}
+
+.typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 13px;
+  background: var(--color-background-secondary);
+  border-radius: var(--border-radius-md);
+  border-bottom-left-radius: 3px;
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+  animation: blink 1.2s infinite ease-in-out;
+}
+
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes blink {
+  0%, 80%, 100% { opacity: 0.2; transform: scale(0.85); }
+  40%            { opacity: 1;   transform: scale(1); }
+}
