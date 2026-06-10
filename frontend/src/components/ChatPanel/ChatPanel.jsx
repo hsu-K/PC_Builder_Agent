@@ -20,8 +20,10 @@ export default function ChatPanel({
   id,
   messages: initialMessages = [],
   preference = {},
+  articles = [],
   onBuildUpdate,
   onPreferenceUpdate,
+  onArticlesUpdate,
 }) {
   const { messages, isLoading, sendMessage } = useChat(initialMessages)
   const [ suggestions, setSuggestions ] = useState(SUGGESTIONS)
@@ -33,7 +35,7 @@ export default function ChatPanel({
   }, [messages, isLoading])
 
   const handleSend = (text) => {
-    sendMessage(id, text, onBuildUpdate, preference)
+    sendMessage(id, text, onBuildUpdate, preference, articles)
   }
 
   const showSuggestions = messages.length === 0
@@ -91,7 +93,7 @@ export default function ChatPanel({
       </div>
 
       {/* Input */}
-      <ChatInput id={id} preference={preference} onSend={handleSend} disabled={isLoading} onSavePreference={onPreferenceUpdate} />
+      <ChatInput id={id} preference={preference} onSend={handleSend} disabled={isLoading} onSavePreference={onPreferenceUpdate} onArticlesFetched={onArticlesUpdate} />
 
     </div>
   )

@@ -24,7 +24,7 @@ export function useChat(initialMessages = []) {
     text,
     onBuildUpdate,
     preference = {},
-    pc_board_response=''
+    articles = [],
   ) => {
       const newMessages = [...messages, { role: 'user', content: text }]
       setMessages(newMessages)
@@ -37,7 +37,7 @@ export function useChat(initialMessages = []) {
           id: id,
           messages: newMessages,
           preference: preference,
-          pc_board_response: pc_board_response?? ""
+          pc_board_articles: articles,
         }
         const fetchResponse = await fetch('http://localhost:8000/chat', {
           method: 'POST',
@@ -80,7 +80,6 @@ export function useChat(initialMessages = []) {
       if (response.options !== undefined) updatePayload.options = response.options
       if (response.budget !== undefined) updatePayload.budget = response.budget
       if (response.suggestions !== undefined) updatePayload.suggestions = response.suggestions
-      if (response.pc_board_response !== undefined) updatePayload.pc_board_response = response.pc_board_response
       onBuildUpdate?.(updatePayload)
 
     } catch (e) {

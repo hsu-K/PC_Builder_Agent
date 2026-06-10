@@ -14,11 +14,13 @@ function AppContent() {
     updatePart,
     updateChat,
     setPreference,
+    setArticles,
   } = useActiveChat()
 
   const activeChatOptions = activeChat?.options ?? {}
   const activeChatMessages = activeChat?.messages ?? []
   const activeChatPreference = activeChat?.preference ?? {}
+  const activeChatArticles = activeChat?.articles ?? []
 
   return (
     <div className="app">
@@ -41,8 +43,10 @@ function AppContent() {
         id={activeChatId}
         messages={activeChatMessages}
         preference={activeChatPreference}
+        articles={activeChatArticles}
         onBuildUpdate={updateChat}
         onPreferenceUpdate={setPreference}
+        onArticlesUpdate={setArticles}
       />
     </div>
   )

@@ -6,7 +6,7 @@ import TemplatePanel from './TemplatePanel'
 import styles from './ChatPanel.module.css'
 
 
-export default function ChatInput({ id, preference, onSend, disabled, onSavePreference }) {
+export default function ChatInput({ id, preference, onSend, disabled, onSavePreference, onArticlesFetched }) {
   const [text, setText] = useState('')
   const [showMenu, setShowMenu] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
@@ -82,7 +82,7 @@ export default function ChatInput({ id, preference, onSend, disabled, onSavePref
 
       {/* Template 面板 */}
       {showTemplates && (
-        <TemplatePanel id={id} preference={preference} onSelect={handleTemplateSelect} onSavePreference={onSavePreference} />
+        <TemplatePanel id={id} preference={preference} onSelect={handleTemplateSelect} onSavePreference={onSavePreference} onArticlesFetched={onArticlesFetched} />
       )}
       {/* 工具列 */}
       <div className={styles.toolbar}>

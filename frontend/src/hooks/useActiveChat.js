@@ -10,6 +10,7 @@ const DEFAULT_CHAT = {
   options: {},
   preference: {},
   messages: [],
+  articles: [],
 }
 
 const ActiveChatContext = createContext(null)
@@ -54,6 +55,13 @@ export function ActiveChatProvider({ children }) {
       updateChat({ preference: { ...activeChat.preference, ...preference } })
     },
     [activeChat.preference, updateChat]
+  )
+
+  const setArticles = useCallback(
+    (articles) => {
+      updateChat({ articles })
+    },
+    [updateChat]
   )
 
   const handleMessagesChange = useCallback(
@@ -101,6 +109,7 @@ export function ActiveChatProvider({ children }) {
       updatePart,
       updateParts,
       setPreference,
+      setArticles,
       handleMessagesChange,
       changeChat,
       addNewBuild,
@@ -114,6 +123,7 @@ export function ActiveChatProvider({ children }) {
       updatePart,
       updateParts,
       setPreference,
+      setArticles,
       handleMessagesChange,
       changeChat,
       addNewBuild,

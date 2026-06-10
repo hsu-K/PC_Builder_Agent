@@ -52,7 +52,7 @@ const DEFAULT_FORM = {
   extra: '',
 }
 
-export default function TemplatePanel({ id, preference, onSelect, onSavePreference }) {
+export default function TemplatePanel({ id, preference, onSelect, onSavePreference, onArticlesFetched }) {
   const [tab, setTab] = useState('custom')   // 'custom' | 'preset'
   const [form, setForm] = useState({ ...DEFAULT_FORM, ...preference })
   const [fetching, setFetching] = useState(false)
@@ -107,6 +107,9 @@ export default function TemplatePanel({ id, preference, onSelect, onSavePreferen
       })
       const data = await res.json()
       setFetchResult(data)
+      if (data.status === 'success' && data.articles) {
+        onArticlesFetched?.(data.articles)
+      }
     } catch (err) {
       setFetchResult({ status: 'error', message: String(err), articles_count: 0, articles: [] })
     } finally {
